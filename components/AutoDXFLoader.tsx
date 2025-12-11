@@ -232,13 +232,13 @@ const AutoDXFLoader: React.FC = () => {
 
         {/* Footer - 저작권 */}
         <div className="px-4 py-2 bg-gray-800 border-t border-gray-700 flex items-center justify-between text-xs text-gray-500">
-          <div className="flex items-center gap-2">
-            <img src="/logo.jpg" alt="SeaStar Logo" className="h-4 w-auto rounded" />
+          <div className="flex items-center gap-3">
+            <img src="/logo.jpg" alt="SeaStar Logo" className="h-5 w-auto" />
             <span>© 2025 SeaStar. All rights reserved.</span>
           </div>
-          <div className="flex items-center gap-3">
-            <a href="https://github.com/byjay/3DVIEW" target="_blank" rel="noopener noreferrer" className="hover:text-blue-400 transition-colors">
-              GitHub
+          <div className="flex items-center gap-4">
+            <a href="mailto:designsir@seastargo.com" className="hover:text-blue-400 transition-colors">
+              designsir@seastargo.com
             </a>
             <span>Powered by Three.js</span>
           </div>
