@@ -160,14 +160,11 @@ const AutoDXFLoader: React.FC = () => {
 
     return (
       <div className="flex flex-col w-screen h-screen bg-gray-900 overflow-hidden">
-        {/* Header */}
-        <div className="flex items-center justify-between px-4 py-3 bg-gradient-to-r from-gray-800 to-gray-850 border-b border-gray-700 shadow-md z-10">
+        {/* Header - 로고와 타이틀만 */}
+        <div className="flex items-center justify-between px-4 py-2 bg-gray-800 border-b border-gray-700 z-10">
           <div className="flex items-center gap-3">
-            {/* 로고 - 원본 비율 */}
-            <img src="/logo.jpg" alt="SeaStar Logo" className="h-8 w-auto rounded shadow" />
-            <h1 className="text-lg font-bold text-gray-100 tracking-tight">
-              3D DXF Viewer
-            </h1>
+            <img src="/logo.jpg" alt="SeaStar" className="h-8 w-auto" />
+            <h1 className="text-lg font-bold text-gray-100">3D DXF Viewer</h1>
           </div>
 
           <div className="flex items-center gap-2">
@@ -182,19 +179,10 @@ const AutoDXFLoader: React.FC = () => {
             />
             <label
               htmlFor="file-upload"
-              className="flex items-center gap-2 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium rounded cursor-pointer transition-colors shadow"
+              className="flex items-center gap-2 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium rounded cursor-pointer transition-colors"
             >
               ➕ DXF 추가
             </label>
-
-            {hasFiles && (
-              <button
-                onClick={handleClearAll}
-                className="px-3 py-1.5 bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/30 text-sm font-medium rounded transition-colors"
-              >
-                모두 지우기
-              </button>
-            )}
           </div>
         </div>
 

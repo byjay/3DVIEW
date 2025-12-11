@@ -721,9 +721,43 @@ const MultiDXFViewer: React.FC<MultiDXFViewerProps> = ({ files }) => {
 
       {/* 중앙 */}
       <div className="flex-1 flex flex-col min-w-0">
-        {/* 헤더 - 로고만 표시 */}
-        <div className="bg-gray-800 border-b border-gray-700 p-2 flex items-center">
-          <img src="/logo.jpg" alt="SeaStar Logo" className="h-8 w-auto" />
+        {/* 상단 툴바 */}
+        <div className="bg-gray-800 border-b border-gray-700 p-2 flex gap-2 flex-wrap items-center">
+          {/* 뷰 전환 버튼 */}
+          <div className="flex gap-1 border-r border-gray-600 pr-2">
+            {(['front', 'back', 'left', 'right', 'top', 'iso'] as ViewType[]).map(v => (
+              <button key={v} onClick={() => setView(v)} className="px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded text-xs">
+                {v === 'front' ? '정면' : v === 'back' ? '후면' : v === 'left' ? '좌' : v === 'right' ? '우' : v === 'top' ? '평면' : 'ISO'}
+              </button>
+            ))}
+          </div>
+
+          {/* 렌더 모드 */}
+          <div className="flex gap-1 border-r border-gray-600 pr-2">
+            <button onClick={() => changeRenderMode('shaded')} className={`px-2 py-1 rounded text-xs ${renderMode === 'shaded' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>음영</button>
+            <button onClick={() => changeRenderMode('wireframe')} className={`px-2 py-1 rounded text-xs ${renderMode === 'wireframe' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>와이어</button>
+            <button onClick={() => changeRenderMode('xray')} className={`px-2 py-1 rounded text-xs ${renderMode === 'xray' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>X-Ray</button>
+          </div>
+
+          {/* Section Box / 서브뷰 */}
+          <div className="flex gap-1 border-r border-gray-600 pr-2">
+            <button onClick={toggleSectionBox} className={`flex items-center gap-1 px-2 py-1 rounded text-xs ${sectionBoxEnabled ? 'bg-cyan-600' : 'bg-gray-700 hover:bg-gray-600'}`}>
+              <BoxSelect size={12} /> Section Box
+            </button>
+            <button onClick={() => setShowSubView(!showSubView)} className={`flex items-center gap-1 px-2 py-1 rounded text-xs ${showSubView ? 'bg-purple-600' : 'bg-gray-700 hover:bg-gray-600'}`}>
+              <Monitor size={12} /> 서브뷰
+            </button>
+          </div>
+
+          {/* 되돌리기 / 맞춤 */}
+          <div className="flex gap-1">
+            <button onClick={undo} disabled={history.length === 0} className="flex items-center gap-1 px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded text-xs disabled:opacity-40">
+              <RotateCcw size={12} /> 되돌리기
+            </button>
+            <button onClick={() => fitCamera(loadedFiles)} className="flex items-center gap-1 px-2 py-1 bg-blue-600 hover:bg-blue-500 rounded text-xs">
+              <Maximize size={12} /> 맞춤
+            </button>
+          </div>
         </div>
 
         {/* 3D 뷰 */}
