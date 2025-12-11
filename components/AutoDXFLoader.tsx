@@ -113,7 +113,7 @@ const AutoDXFLoader: React.FC = () => {
   };
 
   const handleClearAll = () => {
-    if (window.confirm('모든 파일을 제거하시겠습니까?')) {
+    if (window.confirm('Remove all files?')) {
       setDxfFiles([]);
     }
   };
@@ -149,8 +149,8 @@ const AutoDXFLoader: React.FC = () => {
           <div className="absolute top-0 left-0 w-16 h-16 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
         </div>
 
-        <div className="text-xl font-light tracking-wide text-blue-300">DXF 파일 처리 중...</div>
-        <div className="text-sm text-gray-500 mt-2">잠시만 기다려주세요</div>
+        <div className="text-xl font-light tracking-wide text-blue-300">Processing DXF files...</div>
+        <div className="text-sm text-gray-500 mt-2">Please wait...</div>
       </div>
     );
   }
@@ -181,7 +181,7 @@ const AutoDXFLoader: React.FC = () => {
               htmlFor="file-upload"
               className="flex items-center gap-2 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium rounded cursor-pointer transition-colors"
             >
-              ➕ DXF 추가
+              Add DXF
             </label>
           </div>
         </div>
@@ -194,8 +194,8 @@ const AutoDXFLoader: React.FC = () => {
             <div className="w-full h-full flex flex-col items-center justify-center text-gray-500 gap-6">
               <img src="/logo.jpg" alt="Logo" className="w-24 h-24 rounded-xl opacity-50" />
               <div className="text-center">
-                <h2 className="text-2xl font-bold text-gray-300 mb-2">DXF 파일을 업로드하세요</h2>
-                <p className="text-gray-400">상단의 <span className="text-blue-400">DXF 추가</span> 버튼을 클릭하세요.</p>
+                <h2 className="text-2xl font-bold text-gray-300 mb-2">Upload DXF Files</h2>
+                <p className="text-gray-400">Click the <span className="text-blue-400">Add DXF</span> button above.</p>
               </div>
 
               {error && (
@@ -205,13 +205,13 @@ const AutoDXFLoader: React.FC = () => {
               )}
 
               <div className="mt-6 p-5 bg-white/5 border border-dashed border-white/10 rounded-xl max-w-lg text-sm leading-relaxed text-gray-400">
-                <h3 className="font-bold text-green-400 mb-3">지원 기능</h3>
+                <h3 className="font-bold text-green-400 mb-3">Features</h3>
                 <ul className="space-y-1 list-disc list-inside">
-                  <li>멀티 파일 뷰잉 (자동 색상 지정)</li>
-                  <li>Section Box (범위 자르기)</li>
-                  <li>X-Ray / 와이어프레임 모드</li>
-                  <li>레이어별 가시성 및 투명도 조절</li>
-                  <li>3D 회전, 확대/축소, 이동</li>
+                  <li>Multi-file viewing (Auto-color)</li>
+                  <li>Section Box (Clipping)</li>
+                  <li>X-Ray / Wireframe Modes</li>
+                  <li>Layer Visibility & Opacity</li>
+                  <li>3D Rotate, Pan, Zoom</li>
                 </ul>
               </div>
             </div>
