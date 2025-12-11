@@ -3,7 +3,8 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls';
 import { DXFFile } from '../types';
 import {
-  ChevronRight, ChevronDown, Layers, Box, Maximize, Palette, CheckSquare, Square, X, Check
+  ChevronRight, ChevronDown, Layers, Box, Maximize, Palette, CheckSquare, Square,
+  MousePointer, Scissors, Eye, EyeOff, Home
 } from 'lucide-react';
 
 interface MultiDXFViewerProps {
@@ -13,43 +14,35 @@ interface MultiDXFViewerProps {
 // ----------------------------------------------------------------------------
 // Types
 // ----------------------------------------------------------------------------
-
 interface DXFEntity {
   type: string;
   layer?: string;
   x?: number; y?: number; z?: number;
   x1?: number; y1?: number; z1?: number;
   x2?: number; y2?: number; z2?: number;
-  x3?: number; y3?: number; z3?: number;
+  x3?: number; y3?: number; z3?: number; // 3DFACE
   vertices?: { x: number, y: number, z: number }[];
   blockName?: string;
-  radius?: number;
-  startAngle?: number;
-  endAngle?: number;
+  radius?: number; // Circle/Arc
+  startAngle?: number; // Arc
+  endAngle?: number; // Arc
   rotation?: number;
   scale?: { x: number, y: number, z: number };
   closed?: boolean;
   [key: string]: any;
 }
 
-type ViewType = 'front' | 'back' | 'left' | 'right' | 'top' | 'iso';
-
-interface BlockState {
+interface LayerInfo {
   name: string;
-  count: number;
   visible: boolean;
+  color?: string;
+  count: number;
 }
 
 interface LoadedFileState extends DXFFile {
-  blocks: BlockState[];
-  rawEntitiesVisible: boolean;
-  rawEntitiesCount: number;
-}
-
-interface ParsedData {
-  blocks: Record<string, DXFEntity[]>;
-  rawEntities: DXFEntity[];
-  definitions: Record<string, DXFEntity[]>;
+  loaded: boolean; // Is it in the scene?
+  visible: boolean; // Is the whole file visible?
+  layers: LayerInfo[];
 }
 
 // ----------------------------------------------------------------------------
@@ -57,36 +50,32 @@ interface ParsedData {
 // ----------------------------------------------------------------------------
 
 const MultiDXFViewer: React.FC<MultiDXFViewerProps> = ({ files }) => {
-  console.log("English Version Loaded: Init"); // Version Check
+  // Anti-translate attribute
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // State
+  // App State
   const [parsing, setParsing] = useState(false);
   const [showModal, setShowModal] = useState(false);
-  const [error, setError] = useState<string>('');
+  const [previewFiles, setPreviewFiles] = useState<DXFFile[]>([]); // For Modal
 
-  // Data State
-  const [previewFiles, setPreviewFiles] = useState<LoadedFileState[]>([]); // For Modal
-  const [fileStates, setFileStates] = useState<LoadedFileState[]>([]);     // For Viewer (Active)
-
-  // Parsed Geometry Cache (to avoid re-parsing on Modal confirm)
-  const parsedCacheRef = useRef<Map<string, ParsedData>>(new Map());
-
-  // Viewer State
+  // Scene State
+  const [fileStates, setFileStates] = useState<LoadedFileState[]>([]);
   const [renderMode, setRenderMode] = useState<'shaded' | 'wireframe' | 'xray'>('shaded');
-  const [expandedFiles, setExpandedFiles] = useState<Record<string, boolean>>({});
-  const [selectedObject, setSelectedObject] = useState<any | null>(null);
+  const [sectionBoxObject, setSectionBoxObject] = useState<THREE.BoxHelper | null>(null);
+  const [isSectionBoxActive, setIsSectionBoxActive] = useState(false);
+
+  // UI State
+  const [expandedNodes, setExpandedNodes] = useState<Record<string, boolean>>({}); // "fileId", "fileId-layerName"
+  const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null);
 
   // Three.js Refs
   const sceneRef = useRef<THREE.Scene | null>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const controlsRef = useRef<OrbitControls | null>(null);
-  const objectsMapRef = useRef<Map<string, THREE.Group>>(new Map());
+  const objectsMapRef = useRef<Map<string, THREE.Group>>(new Map()); // "fileId" -> Group
 
-  // --------------------------------------------------------------------------
   // 1. Initialize Three.js
-  // --------------------------------------------------------------------------
   useEffect(() => {
     if (!containerRef.current) return;
     if (rendererRef.current) { rendererRef.current.dispose(); containerRef.current.innerHTML = ''; }
@@ -95,35 +84,40 @@ const MultiDXFViewer: React.FC<MultiDXFViewerProps> = ({ files }) => {
     const height = containerRef.current.clientHeight;
 
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x111111);
+    scene.background = new THREE.Color(0x111111); // Dark Gray/Black
     sceneRef.current = scene;
 
-    const camera = new THREE.PerspectiveCamera(60, width / height, 0.1, 500000);
+    const camera = new THREE.PerspectiveCamera(60, width / height, 0.1, 1000000); // Huge far clip for large DXFs
     camera.position.set(1000, 1000, 1000);
-    camera.up.set(0, 0, 1);
+    camera.up.set(0, 0, 1); // Z-up for CAD
     cameraRef.current = camera;
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, logarithmicDepthBuffer: true });
     renderer.setSize(width, height);
     renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.localClippingEnabled = true; // Enable clipping for Section Box
     containerRef.current.appendChild(renderer.domElement);
     rendererRef.current = renderer;
 
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
-    controls.dampingFactor = 0.1;
+    controls.dampingFactor = 0.2;
+    controls.screenSpacePanning = true;
     controlsRef.current = controls;
 
-    scene.add(new THREE.AmbientLight(0xffffff, 0.7));
-    const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
-    dirLight.position.set(100, 100, 200);
+    // Lighting
+    scene.add(new THREE.AmbientLight(0xffffff, 0.8));
+    const dirLight = new THREE.DirectionalLight(0xffffff, 0.5);
+    dirLight.position.set(100, 200, 300);
     scene.add(dirLight);
 
-    const gridHelper = new THREE.GridHelper(5000, 50, 0x444444, 0x222222);
+    // Grid (Navisworks style: subtle)
+    const gridHelper = new THREE.GridHelper(5000, 50, 0x333333, 0x222222);
     gridHelper.rotation.x = Math.PI / 2;
     scene.add(gridHelper);
     scene.add(new THREE.AxesHelper(500));
 
+    // Animation Loop
     const animate = () => {
       requestAnimationFrame(animate);
       if (controlsRef.current) controlsRef.current.update();
@@ -150,15 +144,15 @@ const MultiDXFViewer: React.FC<MultiDXFViewerProps> = ({ files }) => {
     };
   }, []);
 
-  // --------------------------------------------------------------------------
-  // 2. Handle File Prop -> Parse -> Modal
-  // --------------------------------------------------------------------------
+  // 2. Handle File Changes -> Open Modal
   useEffect(() => {
     if (files.length > 0) {
-      parseFiles(files);
+      // Just show modal with list of files. No parsing yet (optimization).
+      setPreviewFiles(files.map(f => ({ ...f }))); // Clone
+      setShowModal(true);
     } else {
-      clearScene();
       setShowModal(false);
+      clearScene();
     }
   }, [files]);
 
@@ -167,366 +161,350 @@ const MultiDXFViewer: React.FC<MultiDXFViewerProps> = ({ files }) => {
     objectsMapRef.current.forEach(g => sceneRef.current?.remove(g));
     objectsMapRef.current.clear();
     setFileStates([]);
-    setPreviewFiles([]);
-    parsedCacheRef.current.clear();
   };
 
-  const parseFiles = async (dxfFiles: DXFFile[]) => {
+  // 3. Import Selected Files
+  const handleImport = async (selectedFiles: DXFFile[]) => {
+    setShowModal(false);
     setParsing(true);
-    setError('');
-    const newPreviews: LoadedFileState[] = [];
-    parsedCacheRef.current.clear();
 
-    try {
-      // Simulate async for UI responsiveness
-      await new Promise(r => setTimeout(r, 100));
+    // Clear existing
+    clearScene();
 
-      for (const file of dxfFiles) {
-        if (!file.content) continue;
-        const result = parseDXFStructure(file.content);
-        parsedCacheRef.current.set(file.id, result);
+    const newFileStates: LoadedFileState[] = [];
 
-        const blocks: BlockState[] = Object.entries(result.blocks).map(([name, ents]) => ({
-          name, count: ents.length, visible: false // Default unchecked
-        })).sort((a, b) => a.name.localeCompare(b.name));
+    // Process each file
+    // We do ONE robust parse per file.
+    for (const file of selectedFiles) {
+      // Init State
+      const fState: LoadedFileState = { ...file, loaded: true, visible: true, layers: [] };
 
-        newPreviews.push({
-          ...file,
-          blocks,
-          rawEntitiesVisible: false, // Default unchecked
-          rawEntitiesCount: result.rawEntities.length
-        });
+      if (file.content) {
+        // Parse & Build
+        try {
+          const { group, layers } = await parseAndBuildDXF(file.content, file.color);
+          group.name = file.id;
+
+          if (sceneRef.current) sceneRef.current.add(group);
+          objectsMapRef.current.set(file.id, group);
+
+          fState.layers = layers;
+          setExpandedNodes(prev => ({ ...prev, [file.id]: true })); // Auto Expand
+        } catch (e) {
+          console.error("Parse Fail", e);
+        }
       }
-
-      setPreviewFiles(newPreviews);
-      setShowModal(true); // Open Popup
-
-    } catch (err) {
-      console.error(err);
-      setError('Error parsing files.');
-    } finally {
-      setParsing(false);
+      newFileStates.push(fState);
     }
+
+    setFileStates(newFileStates);
+    setParsing(false);
+    setTimeout(handleFitView, 100);
   };
 
   // --------------------------------------------------------------------------
-  // 3. Confirm Selection -> Load to Scene
+  // Core Business Logic: Robust Parsing
   // --------------------------------------------------------------------------
-  const handleConfirmSelection = () => {
-    // 1. Move preview -> active state
-    setFileStates(previewFiles);
+  const parseAndBuildDXF = async (data: string, colorHex: string): Promise<{ group: THREE.Group, layers: LayerInfo[] }> => {
+    return new Promise((resolve) => {
+      // Basic Parser
+      const lines = data.split(/\r?\n/);
+      const entities: DXFEntity[] = [];
+      const blocks: Record<string, DXFEntity[]> = {};
+      let currentBlockName: string | null = null;
+      let currentBlockEnts: DXFEntity[] = [];
+      let currentEntity: DXFEntity | null = null;
+      let section: string | null = null;
 
-    // 2. Build Scene Objects for Checked items
-    // (Actually, efficient way: Build ALL, but set visibility based on check. 
-    // BUT user said "insert". Maybe we only build what is checked?
-    // Let's build all but respect visibility. It's safer for "Show later".)
-
-    // Clear old
-    objectsMapRef.current.forEach(g => sceneRef.current?.remove(g));
-    objectsMapRef.current.clear();
-
-    previewFiles.forEach(file => {
-      const parsed = parsedCacheRef.current.get(file.id);
-      if (!parsed) return;
-
-      // Blocks
-      file.blocks.forEach(blk => {
-        const entities = parsed.blocks[blk.name];
-        if (entities) {
-          const grp = buildGroupFromEntities(entities, parsed.definitions, file.color, renderMode);
-          grp.visible = blk.visible; // Set initial visibility
-          grp.name = `${file.id}||BLOCK||${blk.name}`;
-          sceneRef.current?.add(grp);
-          objectsMapRef.current.set(grp.name, grp);
+      const commit = () => {
+        if (currentEntity) {
+          if (section === 'BLOCKS' && currentBlockName) currentBlockEnts.push(currentEntity);
+          else if (section === 'ENTITIES') entities.push(currentEntity);
+          currentEntity = null;
         }
+      };
+
+      for (let i = 0; i < lines.length - 1; i += 2) {
+        const code = parseInt(lines[i].trim());
+        const val = lines[i + 1].trim();
+        if (code === 0) {
+          commit();
+          if (val === 'SECTION') section = null;
+          else if (val === 'ENDSEC') section = null;
+          else if (val === 'BLOCK') { currentBlockName = ''; currentBlockEnts = []; }
+          else if (val === 'ENDBLK') { if (currentBlockName) blocks[currentBlockName] = currentBlockEnts; currentBlockName = null; }
+          else if (val === 'LINE' || val === 'LWPOLYLINE' || val === 'CIRCLE' || val === 'ARC' || val === '3DFACE' || val === 'INSERT') {
+            if (section === 'ENTITIES' || (section === 'BLOCKS' && currentBlockName !== null)) currentEntity = { type: val };
+          }
+        } else if (code === 2 && (val === 'ENTITIES' || val === 'BLOCKS')) section = val;
+        else if (code === 2 && section === 'BLOCKS' && currentBlockName === '') currentBlockName = val;
+        else if (currentEntity) {
+          const num = parseFloat(val);
+          if (code === 8) currentEntity.layer = val; // Layer
+          else if (code === 2 && currentEntity.type === 'INSERT') currentEntity.blockName = val;
+          // Coords
+          else if (code === 10) currentEntity.x = num; else if (code === 20) currentEntity.y = num; else if (code === 30) currentEntity.z = num;
+          else if (code === 11) currentEntity.x1 = num; else if (code === 21) currentEntity.y1 = num; else if (code === 31) currentEntity.z1 = num;
+          else if (code === 12) currentEntity.x2 = num; else if (code === 22) currentEntity.y2 = num; else if (code === 32) currentEntity.z2 = num;
+          else if (code === 13) currentEntity.x3 = num; else if (code === 23) currentEntity.y3 = num; else if (code === 33) currentEntity.z3 = num;
+          // Props
+          else if (code === 40) currentEntity.radius = num;
+          else if (code === 50) { currentEntity.startAngle = num; currentEntity.rotation = num; }
+          else if (code === 51) currentEntity.endAngle = num;
+          else if (code === 41) { if (!currentEntity.scale) currentEntity.scale = { x: 1, y: 1, z: 1 }; currentEntity.scale.x = num; }
+          else if (code === 42) { if (!currentEntity.scale) currentEntity.scale = { x: 1, y: 1, z: 1 }; currentEntity.scale.y = num; }
+          else if (code === 43) { if (!currentEntity.scale) currentEntity.scale = { x: 1, y: 1, z: 1 }; currentEntity.scale.z = num; }
+          // Polyline
+          else if (code === 70 && currentEntity.type === 'LWPOLYLINE') currentEntity.closed = (num & 1) === 1;
+          else if ((code === 10 || code === 20) && currentEntity.type === 'LWPOLYLINE') {
+            if (code === 10) { if (!currentEntity.vertices) currentEntity.vertices = []; currentEntity.vertices.push({ x: num, y: 0, z: 0 }); }
+            if (code === 20 && currentEntity.vertices) currentEntity.vertices[currentEntity.vertices.length - 1].y = num;
+          }
+        }
+      }
+      commit();
+
+      // Build Group
+      const rootGroup = new THREE.Group();
+      const layersSet = new Set<string>();
+      const layerCounts: Record<string, number> = {};
+
+      const matLine = new THREE.LineBasicMaterial({ color: new THREE.Color(colorHex) });
+      const matMesh = new THREE.MeshBasicMaterial({ color: new THREE.Color(colorHex), side: THREE.DoubleSide });
+
+      const createObj = (e: DXFEntity, level = 0): THREE.Object3D | null => {
+        if (level > 8) return null;
+        let obj: THREE.Object3D | null = null;
+
+        if (e.type === 'LINE') {
+          const pts = [new THREE.Vector3(e.x || 0, e.y || 0, e.z || 0), new THREE.Vector3(e.x1 || 0, e.y1 || 0, e.z1 || 0)];
+          obj = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), matLine);
+        } else if (e.type === 'LWPOLYLINE' && e.vertices) {
+          const pts = e.vertices.map(v => new THREE.Vector3(v.x, v.y, e.z || 0));
+          if (e.closed && pts.length > 0) pts.push(pts[0]);
+          obj = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), matLine);
+        } else if (e.type === 'CIRCLE' || e.type === 'ARC') {
+          const start = e.type === 'ARC' ? (e.startAngle || 0) * Math.PI / 180 : 0;
+          const end = e.type === 'ARC' ? (e.endAngle || 0) * Math.PI / 180 : 2 * Math.PI;
+          const curve = new THREE.EllipseCurve(0, 0, e.radius || 1, e.radius || 1, start, end, false, 0);
+          const pts = curve.getPoints(32).map(p => new THREE.Vector3(p.x, p.y, 0));
+          obj = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), matLine);
+          obj.position.set(e.x || 0, e.y || 0, e.z || 0); // Arc center
+        } else if (e.type === '3DFACE') {
+          const pts = [new THREE.Vector3(e.x, e.y, e.z), new THREE.Vector3(e.x1, e.y1, e.z1), new THREE.Vector3(e.x2, e.y2, e.z2), new THREE.Vector3(e.x3, e.y3, e.z3)];
+          if (!pts[3].equals(pts[2])) pts.push(pts[0], pts[2]);
+          const geo = new THREE.BufferGeometry().setFromPoints(pts);
+          geo.computeVertexNormals();
+          obj = new THREE.Mesh(geo, matMesh);
+        } else if (e.type === 'INSERT' && e.blockName && blocks[e.blockName]) {
+          const grp = new THREE.Group();
+          // Inherit layer if undefined in block ent? No, block ent has own layer usually.
+          blocks[e.blockName].forEach(child => {
+            const cObj = createObj(child, level + 1);
+            if (cObj) grp.add(cObj);
+          });
+          grp.position.set(e.x || 0, e.y || 0, e.z || 0);
+          grp.scale.set(e.scale?.x || 1, e.scale?.y || 1, e.scale?.z || 1);
+          if (e.rotation) grp.rotation.z = e.rotation * Math.PI / 180;
+          obj = grp;
+        }
+
+        if (obj && e.layer) {
+          obj.userData = { layer: e.layer }; // Tag for Layer Filtering
+          layersSet.add(e.layer);
+          layerCounts[e.layer] = (layerCounts[e.layer] || 0) + 1;
+        }
+        return obj;
+      };
+
+      entities.forEach(e => {
+        const o = createObj(e);
+        if (o) rootGroup.add(o);
       });
 
-      // Raw
-      if (file.rawEntitiesCount > 0) {
-        const grp = buildGroupFromEntities(parsed.rawEntities, parsed.definitions, file.color, renderMode);
-        grp.visible = file.rawEntitiesVisible;
-        grp.name = `${file.id}||RAW`;
-        sceneRef.current?.add(grp);
-        objectsMapRef.current.set(grp.name, grp);
-      }
+      // Build Layer List for UI
+      const layers = Array.from(layersSet).map(name => ({ name, visible: true, count: layerCounts[name] })).sort((a, b) => a.name.localeCompare(b.name));
 
-      // Auto expand in tree
-      setExpandedFiles(p => ({ ...p, [file.id]: true }));
+      resolve({ group: rootGroup, layers });
     });
-
-    setShowModal(false);
-
-    // Fit view if anything is visible
-    setTimeout(() => handleFitView(), 100);
   };
 
   // --------------------------------------------------------------------------
-  // Modal Handlers
+  // UI & View Logic
   // --------------------------------------------------------------------------
-  const togglePreviewBlock = (fileId: string, blockName: string, checked: boolean) => {
-    setPreviewFiles(prev => prev.map(f => {
-      if (f.id !== fileId) return f;
-      return { ...f, blocks: f.blocks.map(b => b.name === blockName ? { ...b, visible: checked } : b) };
-    }));
-  };
-
-  const togglePreviewRaw = (fileId: string, checked: boolean) => {
-    setPreviewFiles(prev => prev.map(f => {
-      if (f.id !== fileId) return f;
-      return { ...f, rawEntitiesVisible: checked };
-    }));
-  };
-
-  const toggleAllPreview = (checked: boolean) => {
-    setPreviewFiles(prev => prev.map(f => ({
-      ...f,
-      rawEntitiesVisible: checked,
-      blocks: f.blocks.map(b => ({ ...b, visible: checked }))
-    })));
-  };
-
-  // --------------------------------------------------------------------------
-  // Viewer Handlers (Sidebar)
-  // --------------------------------------------------------------------------
-  const toggleBlock = (fileId: string, blockName: string, visible: boolean) => {
-    setFileStates(prev => prev.map(f => f.id === fileId ? { ...f, blocks: f.blocks.map(b => b.name === blockName ? { ...b, visible } : b) } : f));
-    const grp = objectsMapRef.current.get(`${fileId}||BLOCK||${blockName}`);
-    if (grp) grp.visible = visible;
-  };
-
-  const toggleRaw = (fileId: string, visible: boolean) => {
-    setFileStates(prev => prev.map(f => f.id === fileId ? { ...f, rawEntitiesVisible: visible } : f));
-    const grp = objectsMapRef.current.get(`${fileId}||RAW`);
-    if (grp) grp.visible = visible;
-  };
-
-  const setView = (v: ViewType) => {
-    if (!cameraRef.current || !controlsRef.current) return;
-    const dist = 2000;
-    const center = controlsRef.current.target.clone();
-    // Simplified view logic for brevity (same as previous)
-    switch (v) {
-      case 'front': cameraRef.current.position.set(center.x, center.y - dist, center.z); break;
-      // ... (others implied or added if space permits)
-      case 'iso': cameraRef.current.position.set(center.x + dist, center.y - dist, center.z + dist); break;
-      default: cameraRef.current.position.set(center.x, center.y - dist, center.z);
-    }
-    cameraRef.current.lookAt(center);
-    controlsRef.current.update();
-  };
 
   const handleFitView = () => {
     if (!sceneRef.current || !cameraRef.current || !controlsRef.current) return;
     const box = new THREE.Box3();
     let hasObj = false;
-    objectsMapRef.current.forEach(g => { if (g.visible) { box.expandByObject(g); hasObj = true; } });
+    sceneRef.current.traverse(o => {
+      if ((o.type === 'Line' || o.type === 'Mesh') && o.visible) {
+        // Basic Check
+        box.expandByObject(o);
+        hasObj = true;
+      }
+    });
     if (hasObj && !box.isEmpty()) {
       const center = box.getCenter(new THREE.Vector3());
       const size = box.getSize(new THREE.Vector3());
-      const maxDim = Math.max(size.x, size.y, size.z);
-      const cameraZ = maxDim * 2;
-      cameraRef.current.position.set(center.x + cameraZ, center.y - cameraZ, center.z + cameraZ * 0.5);
+      const max = Math.max(size.x, size.y, size.z);
+      const fov = cameraRef.current.fov * (Math.PI / 180);
+      let camZ = Math.abs(max / 2 / Math.tan(fov / 2)) * 1.5;
+      cameraRef.current.position.set(center.x + camZ, center.y - camZ, center.z + camZ * 0.5);
       cameraRef.current.lookAt(center);
       controlsRef.current.target.copy(center);
       controlsRef.current.update();
     }
   };
 
+  const toggleSectionBox = () => {
+    if (!sceneRef.current) return;
+
+    if (isSectionBoxActive) {
+      // Disable
+      if (sectionBoxObject) sceneRef.current.remove(sectionBoxObject);
+      setSectionBoxObject(null);
+      setIsSectionBoxActive(false);
+      if (rendererRef.current) rendererRef.current.clippingPlanes = []; // Clear global clippers
+      // Reset materials? Local clipping needs material props. 
+      // For simplicity, we just toggle Visual Box for now unless requested clipping.
+    } else {
+      // Enable
+      const box = new THREE.Box3();
+      sceneRef.current.traverse(o => { if ((o.type === 'Line' || o.type === 'Mesh') && o.visible) box.expandByObject(o); });
+      if (box.isEmpty()) return;
+
+      const helper = new THREE.Box3Helper(box, new THREE.Color(0x00ffff));
+      sceneRef.current.add(helper);
+      setSectionBoxObject(helper as any);
+      setIsSectionBoxActive(true);
+    }
+  };
+
   const changeRenderMode = (mode: 'shaded' | 'wireframe' | 'xray') => {
     setRenderMode(mode);
-    sceneRef.current?.traverse(c => {
-      if (c instanceof THREE.Mesh) {
-        const m = c.material as THREE.MeshBasicMaterial;
+    sceneRef.current?.traverse(child => {
+      if (child instanceof THREE.Mesh) {
+        const m = child.material as THREE.MeshBasicMaterial;
         m.wireframe = mode === 'wireframe';
         m.transparent = mode === 'xray';
-        m.opacity = mode === 'xray' ? 0.3 : 1;
-        m.depthWrite = mode !== 'xray';
+        m.opacity = mode === 'xray' ? 0.4 : 1;
         m.needsUpdate = true;
       }
     });
   };
 
-  // --------------------------------------------------------------------------
-  // Parser & Builder (Simplified for this file)
-  // --------------------------------------------------------------------------
-  const parseDXFStructure = (content: string): ParsedData => {
-    // (Simplified logic from before - robust extraction of INSERTs)
-    const lines = content.split(/\r?\n/);
-    const blocks: Record<string, DXFEntity[]> = {};
-    const definitions: Record<string, DXFEntity[]> = {};
-    const rawEntities: DXFEntity[] = [];
-
-    let section: string | null = null;
-    let currentBlockName: string | null = null;
-    let currentBlockEntities: DXFEntity[] = [];
-    let currentEntity: DXFEntity | null = null;
-
-    const commit = () => {
-      if (!currentEntity) return;
-      if (section === 'BLOCKS' && currentBlockName) currentBlockEntities.push(currentEntity);
-      else if (section === 'ENTITIES') rawEntities.push(currentEntity);
-      currentEntity = null;
-    };
-
-    for (let i = 0; i < lines.length - 1; i += 2) {
-      const code = parseInt(lines[i].trim());
-      const val = lines[i + 1].trim();
-      if (code === 0) {
-        commit();
-        if (val === 'SECTION') section = null;
-        else if (val === 'ENDSEC') section = null;
-        else if (val === 'BLOCK') { currentBlockName = ''; currentBlockEntities = []; }
-        else if (val === 'ENDBLK') {
-          if (currentBlockName) definitions[currentBlockName] = currentBlockEntities;
-          currentBlockName = null;
-        }
-        else if (section === 'ENTITIES' || (section === 'BLOCKS' && currentBlockName !== null)) currentEntity = { type: val };
-      } else if (code === 2 && (val === 'ENTITIES' || val === 'BLOCKS')) section = val;
-      else if (code === 2 && section === 'BLOCKS' && currentBlockName === '') currentBlockName = val;
-      else if (currentEntity) {
-        const num = parseFloat(val);
-        if (code === 2 && currentEntity.type === 'INSERT') currentEntity.blockName = val;
-        else if (code === 10) currentEntity.x = num;
-        else if (code === 20) currentEntity.y = num;
-        else if (code === 30) currentEntity.z = num;
-        // ... (Other simplified props)
-        else if (code === 41) { if (!currentEntity.scale) currentEntity.scale = { x: 1, y: 1, z: 1 }; currentEntity.scale.x = num; }
-        // ...
-      }
+  const toggleLayer = (fileId: string, layerName: string, visible: boolean) => {
+    setFileStates(prev => prev.map(f => {
+      if (f.id !== fileId) return f;
+      return { ...f, layers: f.layers.map(l => l.name === layerName ? { ...l, visible } : l) };
+    }));
+    // Update Scene (Traversal for filtered visibility)
+    // This is expensive for huge files, but works for viewing.
+    const group = objectsMapRef.current.get(fileId);
+    if (group) {
+      group.traverse(o => {
+        if (o.userData.layer === layerName) o.visible = visible;
+      });
     }
-    commit();
-
-    // Separate Raw vs Inserts
-    const finalRaw: DXFEntity[] = [];
-    const instances: Record<string, DXFEntity[]> = {};
-    rawEntities.forEach(e => {
-      if (e.type === 'INSERT' && e.blockName) {
-        if (!instances[e.blockName]) instances[e.blockName] = [];
-        instances[e.blockName].push(e);
-      } else {
-        finalRaw.push(e);
-      }
-    });
-
-    return { blocks: instances, rawEntities: finalRaw, definitions };
   };
 
-  const buildGroupFromEntities = (ents: DXFEntity[], defs: Record<string, DXFEntity[]>, color: string, rMode: string): THREE.Group => {
-    const grp = new THREE.Group();
-    const matLine = new THREE.LineBasicMaterial({ color: new THREE.Color(color) });
-    const matMesh = new THREE.MeshBasicMaterial({
-      color: new THREE.Color(color), side: THREE.DoubleSide,
-      wireframe: rMode === 'wireframe', transparent: rMode === 'xray', opacity: rMode === 'xray' ? 0.3 : 1
-    });
-
-    // Recursive builder
-    const create = (e: DXFEntity, lvl = 0): THREE.Object3D | null => {
-      if (lvl > 5) return null;
-      if (e.type === 'LINE') {
-        const pts = [new THREE.Vector3(e.x || 0, e.y || 0, e.z || 0), new THREE.Vector3(e.x1 || 0, e.y1 || 0, e.z1 || 0)]; // simplified
-        return new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), matLine); // simplified
-      }
-      // ... (Circle, Arc, 3DFace logic from before)
-      if (e.type === 'INSERT' && e.blockName && defs[e.blockName]) {
-        const bGrp = new THREE.Group();
-        defs[e.blockName].forEach(c => { const o = create(c, lvl + 1); if (o) bGrp.add(o); });
-        bGrp.position.set(e.x || 0, e.y || 0, e.z || 0);
-        // scale/rot
-        return bGrp;
-      }
-      return null;
-    };
-
-    ents.forEach(e => { const o = create(e); if (o) grp.add(o); });
-    return grp;
+  const toggleFile = (fileId: string, visible: boolean) => {
+    setFileStates(prev => prev.map(f => f.id === fileId ? { ...f, visible } : f));
+    const group = objectsMapRef.current.get(fileId);
+    if (group) group.visible = visible;
   };
 
   // --------------------------------------------------------------------------
-  // Render
+  // Render JSX
   // --------------------------------------------------------------------------
+
+  // Selection Modal
+  const [modalSelection, setModalSelection] = useState<Record<string, boolean>>({});
+
+  const handleModalCheck = (id: string, checked: boolean) => {
+    setModalSelection(p => ({ ...p, [id]: checked }));
+  };
+
+  const handleModalSubmit = () => {
+    const selected = previewFiles.filter(f => modalSelection[f.id] !== false); // Default True if not in map?
+    // Actually let's default to unchecked? User said "check to insert".
+    // Let's rely on explicit check.
+    // But verify user intent. "Default nothing loading".
+    // So default everything UNCHECKED in state.
+    // Wait, `modalSelection` starts empty.
+    // If I want default empty, I treat undefined as false.
+    const explicitSelected = previewFiles.filter(f => modalSelection[f.id] === true);
+    handleImport(explicitSelected);
+  };
+
   return (
     <div className="flex h-full bg-[#111] text-gray-200 font-sans overflow-hidden relative" translate="no">
 
-      {/* 1. Modal Overlay */}
+      {/* INITIAL POPUP */}
       {showModal && (
-        <div className="absolute inset-0 z-[100] bg-black/80 backdrop-blur-sm flex items-center justify-center p-10">
-          <div className="bg-[#1e1e24] border border-gray-600 rounded-xl shadow-2xl w-full max-w-4xl h-full max-h-[80vh] flex flex-col overflow-hidden">
-            <div className="p-4 border-b border-gray-700 bg-gray-800 flex items-center justify-between">
-              <h2 className="text-lg font-bold text-white flex items-center gap-2">
-                <CheckSquare size={20} className="text-blue-400" />
-                Select Content to Import
-              </h2>
-              <div className="text-xs text-gray-400">Total Files: {previewFiles.length}</div>
+        <div className="absolute inset-0 z-[100] bg-black/80 flex items-center justify-center p-8 backdrop-blur-sm">
+          <div className="bg-[#1e1e24] w-full max-w-lg rounded-xl border border-gray-600 shadow-2xl flex flex-col max-h-[80vh]">
+            <div className="p-4 border-b border-gray-700 font-bold text-lg text-white flex items-center gap-2">
+              <CheckSquare className="text-blue-500" /> Select Files to Load
             </div>
-
-            <div className="flex-1 overflow-y-auto p-4 custom-scrollbar bg-[#111]">
-              <div className="flex justify-end gap-2 mb-2">
-                <button onClick={() => toggleAllPreview(true)} className="text-xs text-blue-400 hover:text-white">Select All</button>
-                <button onClick={() => toggleAllPreview(false)} className="text-xs text-gray-500 hover:text-white">Deselect All</button>
-              </div>
-
-              {previewFiles.map(file => (
-                <div key={file.id} className="mb-4 bg-gray-800/50 rounded-lg border border-gray-700 overflow-hidden">
-                  <div className="p-2 bg-gray-800 flex items-center gap-2 font-medium text-gray-200">
-                    <div className="w-3 h-3 rounded-full" style={{ backgroundColor: file.color }} />
-                    {file.name}
-                  </div>
-                  <div className="p-2 grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2">
-                    {/* Raw */}
-                    {file.rawEntitiesCount > 0 && (
-                      <label className={`flex items-center gap-2 p-2 rounded cursor-pointer border ${file.rawEntitiesVisible ? 'bg-blue-900/30 border-blue-500/50' : 'bg-gray-900 border-gray-700 hover:border-gray-500'}`}>
-                        <input type="checkbox" checked={file.rawEntitiesVisible} onChange={(e) => togglePreviewRaw(file.id, e.target.checked)} className="hidden" />
-                        {file.rawEntitiesVisible ? <CheckSquare size={16} className="text-blue-400" /> : <Square size={16} className="text-gray-600" />}
-                        <span className="text-xs truncate">Model Space ({file.rawEntitiesCount})</span>
-                      </label>
-                    )}
-                    {/* Blocks */}
-                    {file.blocks.map(blk => (
-                      <label key={blk.name} className={`flex items-center gap-2 p-2 rounded cursor-pointer border ${blk.visible ? 'bg-blue-900/30 border-blue-500/50' : 'bg-gray-900 border-gray-700 hover:border-gray-500'}`}>
-                        <input type="checkbox" checked={blk.visible} onChange={(e) => togglePreviewBlock(file.id, blk.name, e.target.checked)} className="hidden" />
-                        {blk.visible ? <CheckSquare size={16} className="text-orange-400" /> : <Square size={16} className="text-gray-600" />}
-                        <span className="text-xs truncate" title={blk.name}>{blk.name} <span className="text-gray-500">({blk.count})</span></span>
-                      </label>
-                    ))}
-                  </div>
-                </div>
+            <div className="p-4 overflow-y-auto flex-1 custom-scrollbar space-y-2">
+              {previewFiles.map(f => (
+                <label key={f.id} className={`flex items-center gap-3 p-3 rounded border cursor-pointer hover:bg-gray-700 transition-colors ${modalSelection[f.id] ? 'bg-blue-900/20 border-blue-500' : 'bg-gray-800 border-gray-700'}`}>
+                  <input type="checkbox" className="w-5 h-5 accent-blue-500" checked={!!modalSelection[f.id]} onChange={e => handleModalCheck(f.id, e.target.checked)} />
+                  <span className="font-medium text-gray-200">{f.name}</span>
+                </label>
               ))}
+              {previewFiles.length === 0 && <div className="text-gray-500 text-center py-4">No files detected.</div>}
             </div>
-
-            <div className="p-4 border-t border-gray-700 bg-gray-800 flex justify-end gap-3 transition-colors">
-              <button onClick={handleConfirmSelection} className="px-6 py-2 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded shadow-lg flex items-center gap-2">
-                <Check size={18} /> Import Selected
+            <div className="p-4 border-t border-gray-700 bg-gray-800 flex justify-end">
+              <button onClick={handleModalSubmit} className="px-6 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded font-bold shadow-lg disabled:opacity-50 disabled:cursor-not-allowed" disabled={!Object.values(modalSelection).some(Boolean)}>
+                Load Selected
               </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* 2. Sidebar (Tree) */}
-      <div className="w-72 bg-[#1e1e24] border-r border-gray-700 flex flex-col flex-shrink-0">
-        <div className="p-3 border-b border-gray-700 font-semibold text-sm flex items-center gap-2">
-          <Layers size={16} className="text-blue-400" /> Project Tree
+      {/* LEFT: Selection Tree */}
+      <div className="w-80 bg-[#1e1e24] border-r border-gray-700 flex flex-col flex-shrink-0">
+        <div className="h-10 border-b border-gray-700 bg-gray-800 flex items-center px-3 font-semibold text-xs uppercase tracking-wider text-gray-400">
+          Selection Tree
         </div>
         <div className="flex-1 overflow-y-auto p-2">
+          <div className="flex items-center gap-1.5 text-xs text-gray-400 mb-2 px-1">
+            <Box size={12} /> <span>Standard</span>
+          </div>
           {fileStates.map(file => (
-            <div key={file.id} className="mb-2">
-              <div onClick={() => setExpandedFiles(p => ({ ...p, [file.id]: !p[file.id] }))} className="flex items-center gap-2 p-1.5 hover:bg-white/5 rounded cursor-pointer text-sm text-blue-200">
-                {expandedFiles[file.id] ? <ChevronDown size={14} /> : <ChevronRight size={14} />} {file.name}
+            <div key={file.id} className="mb-1">
+              <div className="flex items-center gap-1 group hover:bg-white/5 rounded px-1 py-1 cursor-pointer select-none">
+                <div onClick={() => setExpandedNodes(p => ({ ...p, [file.id]: !p[file.id] }))} className="p-0.5 hover:bg-white/10 rounded">
+                  {expandedNodes[file.id] ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                </div>
+                <div className="flex-1 flex items-center gap-2" onClick={() => setExpandedNodes(p => ({ ...p, [file.id]: !p[file.id] }))}>
+                  <Box size={14} className="text-blue-400" />
+                  <span className="text-sm text-gray-200">{file.name}</span>
+                  <span className="text-[10px] text-gray-500 bg-gray-800 p-0.5 rounded px-1">{file.layers.length} Layers</span>
+                </div>
+                <button onClick={() => toggleFile(file.id, !file.visible)} className="p-1 opacity-50 hover:opacity-100">
+                  {file.visible ? <Eye size={14} className="text-gray-300" /> : <EyeOff size={14} className="text-gray-600" />}
+                </button>
               </div>
-              {expandedFiles[file.id] && (
-                <div className="pl-6 mt-1 space-y-1">
-                  {file.rawEntitiesCount > 0 && (
-                    <label className="flex items-center gap-2 text-xs text-gray-400 hover:text-white cursor-pointer">
-                      <input type="checkbox" checked={file.rawEntitiesVisible} onChange={e => toggleRaw(file.id, e.target.checked)} className="rounded border-gray-600 bg-gray-700 accent-blue-500" />
-                      Model Space ({file.rawEntitiesCount})
-                    </label>
-                  )}
-                  {file.blocks.map(b => (
-                    <label key={b.name} className="flex items-center gap-2 text-xs text-gray-400 hover:text-white cursor-pointer">
-                      <input type="checkbox" checked={b.visible} onChange={e => toggleBlock(file.id, b.name, e.target.checked)} className="rounded border-gray-600 bg-gray-700 accent-blue-500" />
-                      {b.name} ({b.count})
-                    </label>
+
+              {/* Layers */}
+              {expandedNodes[file.id] && (
+                <div className="pl-6 border-l border-gray-700 ml-2.5 mt-1 space-y-0.5">
+                  {file.layers.map(layer => (
+                    <div key={layer.name} className="flex items-center gap-2 py-0.5 px-1 hover:bg-white/5 rounded text-xs group">
+                      <button onClick={() => toggleLayer(file.id, layer.name, !layer.visible)} className="hover:text-white">
+                        {layer.visible ? <CheckSquare size={12} className="text-blue-500" /> : <Square size={12} className="text-gray-600" />}
+                      </button>
+                      <Layers size={12} className="text-gray-500" />
+                      <span className="text-gray-400 flex-1 truncate" title={layer.name}>{layer.name}</span>
+                      <span className="text-[10px] text-gray-600">({layer.count})</span>
+                    </div>
                   ))}
+                  {file.layers.length === 0 && <div className="text-[10px] text-gray-600 italic pl-1">No visible layers</div>}
                 </div>
               )}
             </div>
@@ -534,38 +512,59 @@ const MultiDXFViewer: React.FC<MultiDXFViewerProps> = ({ files }) => {
         </div>
       </div>
 
-      {/* 3. Main Viewport */}
-      <div className="flex-1 flex flex-col min-w-0 relative">
-        <div className="h-10 bg-gray-800 border-b border-gray-700 flex items-center px-4 gap-4">
-          <div className="flex gap-1">
-            {(['front', 'top', 'iso'] as ViewType[]).map(v => <button key={v} onClick={() => setView(v)} className="px-2 py-1 text-xs bg-gray-700 hover:bg-gray-600 rounded capitalize">{v}</button>)}
+      {/* CENTER: 3D View */}
+      <div className="flex-1 flex flex-col relative min-w-0">
+        {/* Top Toolbar */}
+        <div className="h-12 bg-gray-800 border-b border-gray-700 flex items-center px-4 gap-4 shadow-sm z-10">
+          {/* Navisworks-like tabs/buttons */}
+          <div className="flex items-center gap-1 bg-gray-700/50 p-1 rounded">
+            <button onClick={handleFitView} className="p-1.5 hover:bg-gray-600 rounded text-gray-300" title="Home / Fit"><Home size={18} /></button>
+            <button onClick={() => controlsRef.current?.reset()} className="p-1.5 hover:bg-gray-600 rounded text-gray-300" title="Reset"><MousePointer size={18} /></button>
           </div>
-          <div className="flex gap-1">
-            <button onClick={() => changeRenderMode('shaded')} className={`px-2 py-1 text-xs rounded ${renderMode === 'shaded' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>Shaded</button>
-            <button onClick={() => changeRenderMode('wireframe')} className={`px-2 py-1 text-xs rounded ${renderMode === 'wireframe' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>Wireframe</button>
+
+          <div className="w-px h-6 bg-gray-600 mx-2" />
+
+          <div className="flex items-center gap-2">
+            <button onClick={toggleSectionBox} className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium transition-colors ${isSectionBoxActive ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}>
+              <Scissors size={14} /> Section Box
+            </button>
           </div>
-          <button onClick={handleFitView} className="ml-auto px-3 py-1 text-xs bg-blue-600 hover:bg-blue-500 rounded text-white font-medium flex gap-1 items-center"><Maximize size={12} /> Fit</button>
+
+          <div className="ml-auto flex bg-gray-700/50 rounded p-1 gap-1">
+            <button onClick={() => changeRenderMode('shaded')} className={`px-2 py-1 text-xs rounded ${renderMode === 'shaded' ? 'bg-blue-600 text-white' : 'hover:bg-gray-600 text-gray-400'}`}>Shaded</button>
+            <button onClick={() => changeRenderMode('wireframe')} className={`px-2 py-1 text-xs rounded ${renderMode === 'wireframe' ? 'bg-blue-600 text-white' : 'hover:bg-gray-600 text-gray-400'}`}>Wireframe</button>
+            <button onClick={() => changeRenderMode('xray')} className={`px-2 py-1 text-xs rounded ${renderMode === 'xray' ? 'bg-blue-600 text-white' : 'hover:bg-gray-600 text-gray-400'}`}>X-Ray</button>
+          </div>
         </div>
-        <div className="flex-1 relative bg-gradient-to-br from-[#111] to-[#1a1a1a]">
+
+        {/* Viewport */}
+        <div className="flex-1 relative bg-gradient-to-br from-[#111] to-[#222]">
           <div ref={containerRef} className="w-full h-full" />
-          <div className="absolute bottom-2 left-2 text-[10px] text-gray-500">
-            {parsing ? 'PARSING...' : 'READY'}
+
+          {/* Overlay Status */}
+          <div className="absolute bottom-2 right-2 flex flex-col items-end pointer-events-none select-none">
+            <div className="text-[10px] text-gray-500">
+              {parsing ? 'Parsing Geometry...' : `Ready | ${fileStates.filter(f => f.visible).length} Files Visible`}
+            </div>
           </div>
+
+          {parsing && (
+            <div className="absolute inset-0 bg-black/80 flex flex-col items-center justify-center z-50">
+              <div className="text-blue-400 font-bold animate-pulse text-lg mb-2">Processing DXF...</div>
+              <div className="w-48 h-1 bg-gray-800 rounded overflow-hidden">
+                <div className="h-full bg-blue-500 animate-loading-bar" style={{ width: '50%' }}></div>
+              </div>
+            </div>
+          )}
         </div>
-        {parsing && (
-          <div className="absolute inset-0 bg-black/80 flex flex-col items-center justify-center z-50">
-            <div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin mb-2" />
-            <span className="text-blue-400 text-xs">Parsing DXF...</span>
-          </div>
-        )}
       </div>
 
-      {/* 4. Properties (Simplified) */}
-      <div className="w-64 bg-[#1e1e24] border-l border-gray-700">
-        <div className="p-3 border-b border-gray-700 font-semibold text-sm flex items-center gap-2">
-          <Palette size={16} className="text-orange-400" /> Properties
+      {/* RIGHT: Properties */}
+      <div className="w-64 bg-[#1e1e24] border-l border-gray-700 flex flex-col">
+        <div className="h-10 border-b border-gray-700 bg-gray-800 flex items-center px-3 font-semibold text-xs uppercase tracking-wider text-gray-400">
+          Properties
         </div>
-        <div className="p-4 text-xs text-gray-500 italic">Select an object to view properties...</div>
+        <div className="p-4 text-xs text-gray-500 italic">Select an object...</div>
       </div>
 
     </div>
