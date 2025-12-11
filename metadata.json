@@ -1,0 +1,4 @@
+{
+  "name": "3D DXF Auto Viewer",
+  "description": "A 3D Viewer that automatically loads and visualizes DXF models from a local directory using Three.js and Vite."
+}

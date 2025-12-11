@@ -1,0 +1,576 @@
+import React, { useEffect, useRef, useState } from 'react';
+import { ChevronRight, ChevronDown, Eye, EyeOff, Move, RotateCcw, Box, Maximize2 } from 'lucide-react';
+
+const CADViewer = () => {
+  const containerRef = useRef(null);
+  const [scene, setScene] = useState(null);
+  const [renderer, setRenderer] = useState(null);
+  const [camera, setCamera] = useState(null);
+  const [selectedObjects, setSelectedObjects] = useState([]);
+  const [objectTree, setObjectTree] = useState([]);
+  const [expandedNodes, setExpandedNodes] = useState({});
+  const [renderMode, setRenderMode] = useState('shaded');
+  const [history, setHistory] = useState([]);
+  const [selectionBox, setSelectionBox] = useState(null);
+  const [isSelecting, setIsSelecting] = useState(false);
+
+  useEffect(() => {
+    if (!containerRef.current) return;
+
+    // Three.js 초기화
+    const THREE = window.THREE;
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x1a1a1a);
+
+    const camera = new THREE.PerspectiveCamera(
+      75,
+      containerRef.current.clientWidth / containerRef.current.clientHeight,
+      0.1,
+      1000
+    );
+    camera.position.set(10, 10, 10);
+    camera.lookAt(0, 0, 0);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(containerRef.current.clientWidth, containerRef.current.clientHeight);
+    renderer.shadowMap.enabled = true;
+    containerRef.current.appendChild(renderer.domElement);
+
+    // 조명
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+    scene.add(ambientLight);
+
+    const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+    directionalLight.position.set(10, 10, 10);
+    directionalLight.castShadow = true;
+    scene.add(directionalLight);
+
+    // 그리드
+    const gridHelper = new THREE.GridHelper(20, 20, 0x444444, 0x222222);
+    scene.add(gridHelper);
+
+    // 축
+    const axesHelper = new THREE.AxesHelper(5);
+    scene.add(axesHelper);
+
+    // 샘플 객체 생성
+    const objects = [];
+    const colors = [0xff6b6b, 0x4ecdc4, 0x45b7d1, 0xf9ca24, 0x6c5ce7];
+    
+    for (let i = 0; i < 5; i++) {
+      const geometry = new THREE.BoxGeometry(1, 1 + i * 0.3, 1);
+      const material = new THREE.MeshPhongMaterial({ 
+        color: colors[i],
+        transparent: true,
+        opacity: 1
+      });
+      const cube = new THREE.Mesh(geometry, material);
+      cube.position.set(i * 2 - 4, 0.5, 0);
+      cube.castShadow = true;
+      cube.receiveShadow = true;
+      cube.userData = {
+        name: `블록_${i + 1}`,
+        type: '구조체',
+        material: `재질_${String.fromCharCode(65 + i)}`,
+        volume: (1 * (1 + i * 0.3) * 1).toFixed(2),
+        visible: true,
+        originalColor: colors[i],
+        originalPosition: cube.position.clone()
+      };
+      scene.add(cube);
+      objects.push(cube);
+    }
+
+    // 추가 복잡한 객체들
+    const cylinderGeo = new THREE.CylinderGeometry(0.5, 0.5, 2, 32);
+    const cylinderMat = new THREE.MeshPhongMaterial({ color: 0x95a5a6, transparent: true, opacity: 1 });
+    const cylinder = new THREE.Mesh(cylinderGeo, cylinderMat);
+    cylinder.position.set(0, 1, -3);
+    cylinder.userData = {
+      name: '파이프_1',
+      type: '설비',
+      material: '강철',
+      volume: '1.57',
+      visible: true,
+      originalColor: 0x95a5a6,
+      originalPosition: cylinder.position.clone()
+    };
+    scene.add(cylinder);
+    objects.push(cylinder);
+
+    // 트리 구조 생성
+    const tree = objects.map((obj, idx) => ({
+      id: idx,
+      name: obj.userData.name,
+      type: obj.userData.type,
+      properties: obj.userData,
+      object: obj,
+      children: []
+    }));
+
+    setObjectTree(tree);
+    setScene(scene);
+    setCamera(camera);
+    setRenderer(renderer);
+
+    // 마우스 컨트롤
+    let isDragging = false;
+    let previousMousePosition = { x: 0, y: 0 };
+    let isRightDrag = false;
+
+    const onMouseDown = (e) => {
+      if (e.button === 2) {
+        isRightDrag = true;
+      }
+      isDragging = true;
+      previousMousePosition = { x: e.clientX, y: e.clientY };
+    };
+
+    const onMouseMove = (e) => {
+      if (!isDragging) return;
+
+      const deltaX = e.clientX - previousMousePosition.x;
+      const deltaY = e.clientY - previousMousePosition.y;
+
+      if (isRightDrag) {
+        // 팬
+        camera.position.x -= deltaX * 0.01;
+        camera.position.y += deltaY * 0.01;
+      } else {
+        // 회전
+        const rotationSpeed = 0.005;
+        const x = camera.position.x;
+        const z = camera.position.z;
+        camera.position.x = x * Math.cos(deltaX * rotationSpeed) - z * Math.sin(deltaX * rotationSpeed);
+        camera.position.z = x * Math.sin(deltaX * rotationSpeed) + z * Math.cos(deltaX * rotationSpeed);
+        camera.position.y += deltaY * rotationSpeed * 5;
+      }
+
+      camera.lookAt(0, 0, 0);
+      previousMousePosition = { x: e.clientX, y: e.clientY };
+    };
+
+    const onMouseUp = () => {
+      isDragging = false;
+      isRightDrag = false;
+    };
+
+    const onWheel = (e) => {
+      e.preventDefault();
+      const zoomSpeed = 0.1;
+      const direction = e.deltaY > 0 ? 1 : -1;
+      camera.position.multiplyScalar(1 + direction * zoomSpeed);
+    };
+
+    renderer.domElement.addEventListener('mousedown', onMouseDown);
+    renderer.domElement.addEventListener('mousemove', onMouseMove);
+    renderer.domElement.addEventListener('mouseup', onMouseUp);
+    renderer.domElement.addEventListener('wheel', onWheel);
+    renderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault());
+
+    // 애니메이션 루프
+    const animate = () => {
+      requestAnimationFrame(animate);
+      renderer.render(scene, camera);
+    };
+    animate();
+
+    // 리사이즈
+    const handleResize = () => {
+      camera.aspect = containerRef.current.clientWidth / containerRef.current.clientHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(containerRef.current.clientWidth, containerRef.current.clientHeight);
+    };
+    window.addEventListener('resize', handleResize);
+
+    return () => {
+      window.removeEventListener('resize', handleResize);
+      containerRef.current?.removeChild(renderer.domElement);
+    };
+  }, []);
+
+  const toggleNode = (nodeId) => {
+    setExpandedNodes(prev => ({
+      ...prev,
+      [nodeId]: !prev[nodeId]
+    }));
+  };
+
+  const selectObject = (node) => {
+    const THREE = window.THREE;
+    
+    // 이전 선택 해제
+    selectedObjects.forEach(obj => {
+      if (obj.userData.outline) {
+        scene.remove(obj.userData.outline);
+      }
+    });
+
+    // 새로운 선택
+    const obj = node.object;
+    const geo = new THREE.BoxHelper(obj, 0xffff00);
+    scene.add(geo);
+    obj.userData.outline = geo;
+
+    setSelectedObjects([obj]);
+  };
+
+  const updateObjectColor = (color) => {
+    selectedObjects.forEach(obj => {
+      obj.material.color.setHex(parseInt(color.replace('#', '0x')));
+    });
+  };
+
+  const updateObjectOpacity = (opacity) => {
+    selectedObjects.forEach(obj => {
+      obj.material.opacity = opacity;
+      obj.material.transparent = opacity < 1;
+    });
+  };
+
+  const toggleVisibility = () => {
+    selectedObjects.forEach(obj => {
+      obj.visible = !obj.visible;
+      obj.userData.visible = obj.visible;
+    });
+    setObjectTree([...objectTree]);
+  };
+
+  const moveObject = (axis, delta) => {
+    const state = {
+      objects: selectedObjects.map(obj => ({
+        obj,
+        position: obj.position.clone()
+      }))
+    };
+    setHistory([...history, state]);
+
+    selectedObjects.forEach(obj => {
+      obj.position[axis] += delta;
+    });
+  };
+
+  const undo = () => {
+    if (history.length === 0) return;
+    const lastState = history[history.length - 1];
+    lastState.objects.forEach(({ obj, position }) => {
+      obj.position.copy(position);
+    });
+    setHistory(history.slice(0, -1));
+  };
+
+  const setView = (view) => {
+    if (!camera) return;
+    const distance = 15;
+    
+    switch(view) {
+      case 'front':
+        camera.position.set(0, 0, distance);
+        break;
+      case 'back':
+        camera.position.set(0, 0, -distance);
+        break;
+      case 'left':
+        camera.position.set(-distance, 0, 0);
+        break;
+      case 'right':
+        camera.position.set(distance, 0, 0);
+        break;
+      case 'top':
+        camera.position.set(0, distance, 0);
+        break;
+      case 'iso':
+        camera.position.set(distance, distance, distance);
+        break;
+    }
+    camera.lookAt(0, 0, 0);
+  };
+
+  const resetObject = () => {
+    selectedObjects.forEach(obj => {
+      obj.position.copy(obj.userData.originalPosition);
+      obj.material.color.setHex(obj.userData.originalColor);
+      obj.material.opacity = 1;
+      obj.visible = true;
+    });
+  };
+
+  const changeRenderMode = (mode) => {
+    setRenderMode(mode);
+    if (!scene) return;
+
+    scene.children.forEach(child => {
+      if (child.isMesh && child.material) {
+        if (mode === 'wireframe') {
+          child.material.wireframe = true;
+        } else {
+          child.material.wireframe = false;
+        }
+      }
+    });
+  };
+
+  return (
+    <div className="flex h-screen bg-gray-900 text-white">
+      {/* 좌측 패널 - 트리뷰 */}
+      <div className="w-80 bg-gray-800 border-r border-gray-700 overflow-y-auto">
+        <div className="p-4 border-b border-gray-700">
+          <h2 className="text-lg font-bold">프로젝트 구조</h2>
+        </div>
+        <div className="p-2">
+          {objectTree.map((node) => (
+            <div key={node.id} className="mb-1">
+              <div
+                className={`flex items-center p-2 rounded cursor-pointer hover:bg-gray-700 ${
+                  selectedObjects.includes(node.object) ? 'bg-blue-600' : ''
+                }`}
+                onClick={() => selectObject(node)}
+              >
+                {node.children?.length > 0 && (
+                  <button onClick={(e) => { e.stopPropagation(); toggleNode(node.id); }}>
+                    {expandedNodes[node.id] ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+                  </button>
+                )}
+                <Box size={16} className="mx-2" />
+                <span className="text-sm">{node.name}</span>
+                {!node.object.visible && <EyeOff size={14} className="ml-auto" />}
+              </div>
+              {expandedNodes[node.id] && (
+                <div className="ml-6 mt-1 text-xs text-gray-400">
+                  <div>타입: {node.type}</div>
+                  <div>재질: {node.properties.material}</div>
+                  <div>체적: {node.properties.volume} m³</div>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* 중앙 - 3D 뷰어 */}
+      <div className="flex-1 flex flex-col">
+        {/* 상단 툴바 */}
+        <div className="bg-gray-800 border-b border-gray-700 p-2 flex gap-2 flex-wrap">
+          <div className="flex gap-1 border-r border-gray-600 pr-2">
+            <button
+              onClick={() => setView('front')}
+              className="px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded text-sm"
+              title="정면"
+            >
+              정면
+            </button>
+            <button
+              onClick={() => setView('back')}
+              className="px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded text-sm"
+              title="후면"
+            >
+              후면
+            </button>
+            <button
+              onClick={() => setView('left')}
+              className="px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded text-sm"
+              title="좌측면"
+            >
+              좌측
+            </button>
+            <button
+              onClick={() => setView('right')}
+              className="px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded text-sm"
+              title="우측면"
+            >
+              우측
+            </button>
+            <button
+              onClick={() => setView('top')}
+              className="px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded text-sm"
+              title="평면"
+            >
+              평면
+            </button>
+            <button
+              onClick={() => setView('iso')}
+              className="px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded text-sm"
+              title="ISO"
+            >
+              ISO
+            </button>
+          </div>
+
+          <div className="flex gap-1 border-r border-gray-600 pr-2">
+            <button
+              onClick={() => changeRenderMode('shaded')}
+              className={`px-3 py-1 rounded text-sm ${renderMode === 'shaded' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}
+            >
+              Shaded
+            </button>
+            <button
+              onClick={() => changeRenderMode('wireframe')}
+              className={`px-3 py-1 rounded text-sm ${renderMode === 'wireframe' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}
+            >
+              Wireframe
+            </button>
+          </div>
+
+          <div className="flex gap-1 border-r border-gray-600 pr-2">
+            <button
+              onClick={toggleVisibility}
+              className="px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded text-sm flex items-center gap-1"
+              disabled={selectedObjects.length === 0}
+            >
+              {selectedObjects.length > 0 && selectedObjects[0].visible ? <EyeOff size={16} /> : <Eye size={16} />}
+              {selectedObjects.length > 0 && selectedObjects[0].visible ? '숨기기' : '표시'}
+            </button>
+            <button
+              onClick={undo}
+              className="px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded text-sm flex items-center gap-1"
+              disabled={history.length === 0}
+            >
+              <RotateCcw size={16} />
+              되돌리기
+            </button>
+          </div>
+
+          <div className="flex gap-1">
+            <button
+              onClick={resetObject}
+              className="px-3 py-1 bg-orange-600 hover:bg-orange-500 rounded text-sm"
+              disabled={selectedObjects.length === 0}
+            >
+              초기화
+            </button>
+          </div>
+        </div>
+
+        {/* 3D 뷰 */}
+        <div ref={containerRef} className="flex-1" />
+      </div>
+
+      {/* 우측 패널 - 속성 */}
+      {selectedObjects.length > 0 && (
+        <div className="w-80 bg-gray-800 border-l border-gray-700 overflow-y-auto">
+          <div className="p-4 border-b border-gray-700">
+            <h2 className="text-lg font-bold">객체 속성</h2>
+          </div>
+          <div className="p-4 space-y-4">
+            <div>
+              <label className="block text-sm font-medium mb-2">이름</label>
+              <input
+                type="text"
+                value={selectedObjects[0].userData.name}
+                className="w-full px-3 py-2 bg-gray-700 rounded"
+                readOnly
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium mb-2">타입</label>
+              <input
+                type="text"
+                value={selectedObjects[0].userData.type}
+                className="w-full px-3 py-2 bg-gray-700 rounded"
+                readOnly
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium mb-2">재질</label>
+              <input
+                type="text"
+                value={selectedObjects[0].userData.material}
+                className="w-full px-3 py-2 bg-gray-700 rounded"
+                readOnly
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium mb-2">체적 (m³)</label>
+              <input
+                type="text"
+                value={selectedObjects[0].userData.volume}
+                className="w-full px-3 py-2 bg-gray-700 rounded"
+                readOnly
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium mb-2">색상</label>
+              <input
+                type="color"
+                defaultValue={`#${selectedObjects[0].material.color.getHexString()}`}
+                onChange={(e) => updateObjectColor(e.target.value)}
+                className="w-full h-10 bg-gray-700 rounded cursor-pointer"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium mb-2">
+                투명도: {(selectedObjects[0].material.opacity * 100).toFixed(0)}%
+              </label>
+              <input
+                type="range"
+                min="0"
+                max="100"
+                value={selectedObjects[0].material.opacity * 100}
+                onChange={(e) => updateObjectOpacity(e.target.value / 100)}
+                className="w-full"
+              />
+            </div>
+
+            <div className="border-t border-gray-700 pt-4">
+              <label className="block text-sm font-medium mb-2">이동</label>
+              <div className="grid grid-cols-3 gap-2">
+                <button
+                  onClick={() => moveObject('x', -0.5)}
+                  className="px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded text-sm"
+                >
+                  X-
+                </button>
+                <button
+                  onClick={() => moveObject('x', 0.5)}
+                  className="px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded text-sm"
+                >
+                  X+
+                </button>
+                <button
+                  onClick={() => moveObject('y', 0.5)}
+                  className="px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded text-sm"
+                >
+                  Y+
+                </button>
+                <button
+                  onClick={() => moveObject('z', -0.5)}
+                  className="px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded text-sm"
+                >
+                  Z-
+                </button>
+                <button
+                  onClick={() => moveObject('y', -0.5)}
+                  className="px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded text-sm"
+                >
+                  Y-
+                </button>
+                <button
+                  onClick={() => moveObject('z', 0.5)}
+                  className="px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded text-sm"
+                >
+                  Z+
+                </button>
+              </div>
+            </div>
+
+            <div className="border-t border-gray-700 pt-4">
+              <label className="block text-sm font-medium mb-2">위치</label>
+              <div className="text-sm space-y-1">
+                <div>X: {selectedObjects[0].position.x.toFixed(2)}</div>
+                <div>Y: {selectedObjects[0].position.y.toFixed(2)}</div>
+                <div>Z: {selectedObjects[0].position.z.toFixed(2)}</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default CADViewer;
