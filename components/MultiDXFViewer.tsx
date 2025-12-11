@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls';
 import { DXFFile } from '../types';
-import { ChevronRight, ChevronDown, Eye, EyeOff, Box, Layers, RotateCcw, Maximize, Monitor, Palette, Move3d, BoxSelect, RotateCw, ZoomIn, ZoomOut, Home, Grid3X3 } from 'lucide-react';
+import { ChevronRight, ChevronDown, Eye, EyeOff, Box, Layers, RotateCcw, Maximize, Monitor, Palette, Move3d, BoxSelect, RotateCw, ZoomIn, ZoomOut, Home, Grid3X3, Sun, MousePointer2, Menu, X, Settings } from 'lucide-react';
 
 interface MultiDXFViewerProps {
   files: DXFFile[];
@@ -39,12 +39,12 @@ interface TreeNode {
   color?: string;
   entityCount?: number;
   opacity: number;
+  renderMode: RenderMode;
 }
 
 type ViewType = 'front' | 'back' | 'left' | 'right' | 'top' | 'iso';
 type RenderMode = 'shaded' | 'wireframe' | 'xray';
 
-// Distinct colors for each file
 const FILE_COLORS = [
   '#FF5252', '#FF4081', '#E040FB', '#7C4DFF', '#536DFE',
   '#40C4FF', '#18FFFF', '#64FFDA', '#69F0AE', '#B2FF59',
@@ -60,10 +60,15 @@ const MultiDXFViewer: React.FC<MultiDXFViewerProps> = ({ files }) => {
   const [loadedFiles, setLoadedFiles] = useState<DXFFile[]>([]);
   const [treeData, setTreeData] = useState<TreeNode[]>([]);
   const [selectedNode, setSelectedNode] = useState<TreeNode | null>(null);
-  const [renderMode, setRenderMode] = useState<RenderMode>('shaded');
+  const [globalRenderMode, setGlobalRenderMode] = useState<RenderMode>('shaded');
   const [showSubView, setShowSubView] = useState(false);
   const [sectionBoxEnabled, setSectionBoxEnabled] = useState(false);
-  const [history, setHistory] = useState<{ obj: THREE.Object3D, position: THREE.Vector3 }[][]>([]);
+  const [history, setHistory] = useState<{ obj: THREE.Object3D, position: THREE.Vector3, rotation: THREE.Euler }[][]>([]);
+
+  // Mobile UI States
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const [isPropertiesOpen, setIsPropertiesOpen] = useState(true);
+  const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
 
   const sceneRef = useRef<THREE.Scene | null>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
@@ -74,6 +79,24 @@ const MultiDXFViewer: React.FC<MultiDXFViewerProps> = ({ files }) => {
   const outlineRef = useRef<THREE.BoxHelper | null>(null);
   const sectionBoxRef = useRef<THREE.Mesh | null>(null);
   const edgeGroupRef = useRef<THREE.Group | null>(null);
+
+  // Responsive Check
+  useEffect(() => {
+    const checkMobile = () => {
+      const mobile = window.innerWidth < 768;
+      setIsMobile(mobile);
+      if (mobile) {
+        setIsSidebarOpen(false);
+        setIsPropertiesOpen(false);
+      } else {
+        setIsSidebarOpen(true);
+        setIsPropertiesOpen(true);
+      }
+    };
+    checkMobile();
+    window.addEventListener('resize', checkMobile);
+    return () => window.removeEventListener('resize', checkMobile);
+  }, []);
 
   // Initialize Three.js
   useEffect(() => {
@@ -209,13 +232,8 @@ const MultiDXFViewer: React.FC<MultiDXFViewerProps> = ({ files }) => {
     controlsRef.current.update();
   };
 
-  const changeRenderMode = (mode: RenderMode) => {
-    setRenderMode(mode);
-    if (!sceneRef.current) return;
-
-    if (edgeGroupRef.current) edgeGroupRef.current.clear();
-
-    sceneRef.current.traverse((child) => {
+  const applyRenderModeToObject = (object: THREE.Object3D, mode: RenderMode) => {
+    object.traverse((child) => {
       if ((child as THREE.Mesh).isMesh && (child as THREE.Mesh).material) {
         const mesh = child as THREE.Mesh;
         if (mode === 'wireframe') {
@@ -226,13 +244,6 @@ const MultiDXFViewer: React.FC<MultiDXFViewerProps> = ({ files }) => {
           (mesh.material as any).wireframe = false;
           mesh.material.transparent = true;
           mesh.material.opacity = 0.3;
-          const edges = new THREE.EdgesGeometry(mesh.geometry);
-          const edgeMat = new THREE.LineBasicMaterial({ color: 0xffffff, linewidth: 1 });
-          const edgeLines = new THREE.LineSegments(edges, edgeMat);
-          edgeLines.position.copy(mesh.position);
-          edgeLines.rotation.copy(mesh.rotation);
-          edgeLines.scale.copy(mesh.scale);
-          edgeGroupRef.current?.add(edgeLines);
         } else {
           (mesh.material as any).wireframe = false;
           mesh.material.transparent = true;
@@ -242,6 +253,28 @@ const MultiDXFViewer: React.FC<MultiDXFViewerProps> = ({ files }) => {
       }
     });
   };
+
+  const updateGlobalRenderMode = (mode: RenderMode) => {
+    setGlobalRenderMode(mode);
+    if (!sceneRef.current) return;
+
+    if (edgeGroupRef.current) edgeGroupRef.current.clear(); // Clear global edges if any
+
+    const updateTreeNodes = (nodes: TreeNode[]): TreeNode[] => {
+      return nodes.map(node => {
+        if (node.object) applyRenderModeToObject(node.object, mode);
+        return {
+          ...node,
+          renderMode: mode,
+          children: updateTreeNodes(node.children)
+        };
+      });
+    };
+
+    setTreeData(prev => updateTreeNodes(prev));
+    if (selectedNode) setSelectedNode(prev => prev ? { ...prev, renderMode: mode } : null);
+  };
+
 
   const toggleSectionBox = useCallback(() => {
     if (!sceneRef.current) return;
@@ -280,16 +313,18 @@ const MultiDXFViewer: React.FC<MultiDXFViewerProps> = ({ files }) => {
   // Camera controls
   const zoomIn = () => {
     if (cameraRef.current && controlsRef.current) {
+      const dist = cameraRef.current.position.distanceTo(controlsRef.current.target);
       const direction = new THREE.Vector3().subVectors(controlsRef.current.target, cameraRef.current.position).normalize();
-      cameraRef.current.position.addScaledVector(direction, 200);
+      if (dist > 50) cameraRef.current.position.addScaledVector(direction, dist * 0.2); // Proportional zoom
       controlsRef.current.update();
     }
   };
 
   const zoomOut = () => {
     if (cameraRef.current && controlsRef.current) {
+      const dist = cameraRef.current.position.distanceTo(controlsRef.current.target);
       const direction = new THREE.Vector3().subVectors(controlsRef.current.target, cameraRef.current.position).normalize();
-      cameraRef.current.position.addScaledVector(direction, -200);
+      cameraRef.current.position.addScaledVector(direction, -dist * 0.2); // Proportional zoom
       controlsRef.current.update();
     }
   };
@@ -313,6 +348,7 @@ const MultiDXFViewer: React.FC<MultiDXFViewerProps> = ({ files }) => {
 
   const selectNode = useCallback((node: TreeNode) => {
     setSelectedNode(node);
+    if (isMobile) setIsPropertiesOpen(true); // Open properties on selection in mobile
     if (!sceneRef.current) return;
     if (outlineRef.current) { sceneRef.current.remove(outlineRef.current); outlineRef.current = null; }
     if (node.object) {
@@ -320,7 +356,7 @@ const MultiDXFViewer: React.FC<MultiDXFViewerProps> = ({ files }) => {
       sceneRef.current.add(outline);
       outlineRef.current = outline;
     }
-  }, []);
+  }, [isMobile]);
 
   const toggleNodeVisibility = useCallback((nodeId: string) => {
     const toggle = (nodes: TreeNode[]): TreeNode[] => nodes.map(n => {
@@ -384,25 +420,55 @@ const MultiDXFViewer: React.FC<MultiDXFViewerProps> = ({ files }) => {
     if (selectedNode?.id === nodeId) setSelectedNode(prev => prev ? { ...prev, opacity } : null);
   }, [selectedNode]);
 
+  // Update render mode for node
+  const updateNodeRenderMode = useCallback((nodeId: string, mode: RenderMode) => {
+    const updateTree = (nodes: TreeNode[]): TreeNode[] => nodes.map(n => {
+      if (n.id === nodeId) {
+        if (n.object) applyRenderModeToObject(n.object, mode);
+        return { ...n, renderMode: mode };
+      }
+      return n.children.length > 0 ? { ...n, children: updateTree(n.children) } : n;
+    });
+    setTreeData(prev => updateTree(prev));
+    if (selectedNode?.id === nodeId) setSelectedNode(prev => prev ? { ...prev, renderMode: mode } : null);
+  }, [selectedNode]);
+
   const moveObject = (axis: 'x' | 'y' | 'z', delta: number) => {
     if (!selectedNode?.object) return;
-    setHistory(prev => [...prev, [{ obj: selectedNode.object!, position: selectedNode.object!.position.clone() }]]);
+    setHistory(prev => [...prev, [{
+      obj: selectedNode.object!,
+      position: selectedNode.object!.position.clone(),
+      rotation: selectedNode.object!.rotation.clone()
+    }]]);
     selectedNode.object.position[axis] += delta;
     if (outlineRef.current && sceneRef.current) {
-      sceneRef.current.remove(outlineRef.current);
-      outlineRef.current = new THREE.BoxHelper(selectedNode.object, 0xffff00);
-      sceneRef.current.add(outlineRef.current);
+      outlineRef.current.update();
     }
+  };
+
+  const rotateObject = (axis: 'x' | 'y' | 'z', deltaDeg: number) => {
+    if (!selectedNode?.object) return;
+    setHistory(prev => [...prev, [{
+      obj: selectedNode.object!,
+      position: selectedNode.object!.position.clone(),
+      rotation: selectedNode.object!.rotation.clone()
+    }]]);
+    selectedNode.object.rotation[axis] += (deltaDeg * Math.PI) / 180;
+    if (outlineRef.current) outlineRef.current.update();
   };
 
   const undo = () => {
     if (history.length === 0) return;
-    history[history.length - 1].forEach(({ obj, position }) => obj.position.copy(position));
+    history[history.length - 1].forEach(({ obj, position, rotation }) => {
+      obj.position.copy(position);
+      obj.rotation.copy(rotation);
+    });
     setHistory(prev => prev.slice(0, -1));
+    if (outlineRef.current) outlineRef.current.update();
   };
 
-  // DXF Parser with distinct colors per file
-  const parseDXF = (content: string, fileColor: string, fileName: string, fileIndex: number): { group: THREE.Group, tree: TreeNode } => {
+  // DXF Parser
+  const parseDXF = (content: string, fileColor: string, fileName: string): { group: THREE.Group, tree: TreeNode } => {
     const group = new THREE.Group();
     const lines = content.split(/\r?\n/);
     const blocks: Record<string, DXFEntity[]> = {};
@@ -508,7 +574,6 @@ const MultiDXFViewer: React.FC<MultiDXFViewerProps> = ({ files }) => {
     }
     commitEntity();
 
-    // Use file color for all entities in this file
     const createObject = (e: DXFEntity, layerColor: string): THREE.Object3D | null => {
       const matLine = new THREE.LineBasicMaterial({ color: new THREE.Color(layerColor) });
       const matMesh = new THREE.MeshBasicMaterial({ color: new THREE.Color(layerColor), side: THREE.DoubleSide, transparent: true, opacity: 1 });
@@ -575,7 +640,7 @@ const MultiDXFViewer: React.FC<MultiDXFViewerProps> = ({ files }) => {
       if (!layerGroups[layerName]) {
         layerGroups[layerName] = new THREE.Group();
         layerGroups[layerName].name = `layer_${layerName}`;
-        layerColors[layerName] = fileColor; // Use file color for all layers
+        layerColors[layerName] = fileColor;
       }
       const obj = createObject(e, layerColors[layerName]);
       if (obj) layerGroups[layerName].add(obj);
@@ -585,13 +650,13 @@ const MultiDXFViewer: React.FC<MultiDXFViewerProps> = ({ files }) => {
 
     const fileNode: TreeNode = {
       id: `file_${fileName}`, name: fileName, type: 'file', visible: true, expanded: true,
-      children: [], object: group, color: fileColor, entityCount: entities.length, opacity: 1
+      children: [], object: group, color: fileColor, entityCount: entities.length, opacity: 1, renderMode: 'shaded'
     };
 
     Object.entries(layerGroups).forEach(([layerName, layerGroup]) => {
       fileNode.children.push({
         id: `layer_${fileName}_${layerName}`, name: layerName, type: 'layer', visible: true, expanded: false,
-        children: [], object: layerGroup, color: fileColor, entityCount: layerGroup.children.length, opacity: 1
+        children: [], object: layerGroup, color: fileColor, entityCount: layerGroup.children.length, opacity: 1, renderMode: 'shaded'
       });
     });
 
@@ -620,9 +685,8 @@ const MultiDXFViewer: React.FC<MultiDXFViewerProps> = ({ files }) => {
         if (!dxfFile.content || dxfFile.content.length < 10) continue;
         if (dxfFile.content.startsWith('AutoCAD Binary DXF')) continue;
 
-        // Assign distinct color to each file
         const distinctColor = FILE_COLORS[i % FILE_COLORS.length];
-        const { group, tree } = parseDXF(dxfFile.content, distinctColor, dxfFile.name, i);
+        const { group, tree } = parseDXF(dxfFile.content, distinctColor, dxfFile.name);
         group.name = dxfFile.id;
         group.visible = dxfFile.visible;
 
@@ -693,25 +757,40 @@ const MultiDXFViewer: React.FC<MultiDXFViewerProps> = ({ files }) => {
   };
 
   return (
-    <div className="flex h-full bg-gray-900 text-white overflow-hidden">
-      {/* Left Tree */}
-      <div className="w-72 bg-[#1a1a20] border-r border-gray-700 flex flex-col flex-shrink-0">
+    <div className="flex h-full bg-gray-900 text-white overflow-hidden relative">
+      {/* Mobile Header / Menus */}
+      {isMobile && (
+        <div className="absolute top-0 left-0 right-0 z-20 flex justify-between p-2 bg-gray-900/80 backdrop-blur-sm pointer-events-none">
+          <button onClick={() => setIsSidebarOpen(!isSidebarOpen)} className="p-2 bg-gray-800 rounded shadow pointer-events-auto text-white">
+            {isSidebarOpen ? <X size={20} /> : <Menu size={20} />}
+          </button>
+          {selectedNode && (
+            <button onClick={() => setIsPropertiesOpen(!isPropertiesOpen)} className="p-2 bg-gray-800 rounded shadow pointer-events-auto text-white">
+              {isPropertiesOpen ? <X size={20} /> : <Settings size={20} />}
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Left Tree - Responsive: Collapsible sidebar for mobile */}
+      <div className={`${isMobile ? 'absolute top-0 bottom-0 z-30 shadow-2xl transition-transform duration-300' : 'relative w-72'} ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'} bg-[#1a1a20] border-r border-gray-700 flex flex-col flex-shrink-0 ${isMobile ? 'w-3/4 max-w-xs' : ''}`}>
         <div className="p-3 border-b border-gray-700 flex items-center gap-2 bg-gradient-to-r from-blue-900/30 to-transparent">
           <Layers size={18} className="text-blue-400" />
           <span className="font-bold text-sm">Project Tree</span>
           <span className="ml-auto text-[10px] text-gray-400 bg-gray-800 px-2 py-0.5 rounded">{loadedFiles.length} files</span>
+          {isMobile && <button onClick={() => setIsSidebarOpen(false)} className="ml-2 text-gray-400"><X size={16} /></button>}
         </div>
         <div className="flex-1 overflow-y-auto p-2">{treeData.map(node => renderTreeNode(node))}</div>
       </div>
 
-      {/* Center */}
-      <div className="flex-1 flex flex-col min-w-0">
-        {/* Toolbar */}
-        <div className="bg-gray-800 border-b border-gray-700 p-2 flex gap-2 flex-wrap items-center">
+      {/* Center Main Area */}
+      <div className="flex-1 flex flex-col min-w-0 h-full relative">
+        {/* Toolbar - Responsive: Scrollable horizontal on mobile */}
+        <div className={`bg-gray-800 border-b border-gray-700 p-2 flex gap-2 items-center overflow-x-auto whitespace-nowrap hide-scrollbar ${isMobile ? 'pt-14' : ''}`}>
           {/* View buttons */}
           <div className="flex gap-1 border-r border-gray-600 pr-2">
             {(['front', 'back', 'left', 'right', 'top', 'iso'] as ViewType[]).map(v => (
-              <button key={v} onClick={() => setView(v)} className="px-2 py-1.5 bg-gray-700 hover:bg-gray-600 rounded text-xs capitalize font-medium">
+              <button key={v} onClick={() => setView(v)} className="px-2 py-1.5 bg-gray-700 hover:bg-gray-600 rounded text-xs capitalize font-medium flex-shrink-0">
                 {v}
               </button>
             ))}
@@ -719,68 +798,60 @@ const MultiDXFViewer: React.FC<MultiDXFViewerProps> = ({ files }) => {
 
           {/* Render Mode */}
           <div className="flex gap-1 border-r border-gray-600 pr-2">
-            <button onClick={() => changeRenderMode('shaded')} className={`px-2 py-1.5 rounded text-xs font-medium ${renderMode === 'shaded' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>
+            <button onClick={() => updateGlobalRenderMode('shaded')} className={`px-2 py-1.5 rounded text-xs font-medium flex-shrink-0 ${globalRenderMode === 'shaded' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>
               <Grid3X3 size={14} className="inline mr-1" />Shaded
             </button>
-            <button onClick={() => changeRenderMode('wireframe')} className={`px-2 py-1.5 rounded text-xs font-medium ${renderMode === 'wireframe' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>Wireframe</button>
-            <button onClick={() => changeRenderMode('xray')} className={`px-2 py-1.5 rounded text-xs font-medium ${renderMode === 'xray' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>X-Ray</button>
+            <button onClick={() => updateGlobalRenderMode('wireframe')} className={`px-2 py-1.5 rounded text-xs font-medium flex-shrink-0 ${globalRenderMode === 'wireframe' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>Wireframe</button>
+            <button onClick={() => updateGlobalRenderMode('xray')} className={`px-2 py-1.5 rounded text-xs font-medium flex-shrink-0 ${globalRenderMode === 'xray' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>X-Ray</button>
           </div>
 
-          {/* Section Box / SubView */}
-          <div className="flex gap-1 border-r border-gray-600 pr-2">
-            <button onClick={toggleSectionBox} className={`flex items-center gap-1 px-2 py-1.5 rounded text-xs font-medium ${sectionBoxEnabled ? 'bg-cyan-600' : 'bg-gray-700 hover:bg-gray-600'}`}>
+          {/* Tools */}
+          <div className="flex gap-1">
+            <button onClick={toggleSectionBox} className={`flex items-center gap-1 px-2 py-1.5 rounded text-xs font-medium flex-shrink-0 ${sectionBoxEnabled ? 'bg-cyan-600' : 'bg-gray-700 hover:bg-gray-600'}`}>
               <BoxSelect size={14} /> Section
             </button>
-            <button onClick={() => setShowSubView(!showSubView)} className={`flex items-center gap-1 px-2 py-1.5 rounded text-xs font-medium ${showSubView ? 'bg-purple-600' : 'bg-gray-700 hover:bg-gray-600'}`}>
+            <button onClick={() => setShowSubView(!showSubView)} className={`flex items-center gap-1 px-2 py-1.5 rounded text-xs font-medium flex-shrink-0 ${showSubView ? 'bg-purple-600' : 'bg-gray-700 hover:bg-gray-600'}`}>
               <Monitor size={14} /> SubView
             </button>
-          </div>
-
-          {/* Undo / Fit */}
-          <div className="flex gap-1">
-            <button onClick={undo} disabled={history.length === 0} className="flex items-center gap-1 px-2 py-1.5 bg-gray-700 hover:bg-gray-600 rounded text-xs font-medium disabled:opacity-40">
-              <RotateCcw size={14} /> Undo
-            </button>
-            <button onClick={() => fitCamera(loadedFiles)} className="flex items-center gap-1 px-2 py-1.5 bg-blue-600 hover:bg-blue-500 rounded text-xs font-medium">
-              <Maximize size={14} /> Fit
+            <button onClick={() => fitCamera(loadedFiles)} className="flex items-center gap-1 px-2 py-1.5 bg-blue-600 hover:bg-blue-500 rounded text-xs font-medium flex-shrink-0" title="Zoom All">
+              <Maximize size={14} /> Zoom All
             </button>
           </div>
         </div>
 
         {/* 3D View */}
-        <div className="flex-1 relative">
+        <div className="flex-1 relative w-full h-full overflow-hidden">
           <div ref={containerRef} className="w-full h-full" />
 
-          {/* Floating Camera Controls */}
-          <div className="absolute top-3 right-3 flex flex-col gap-1 bg-gray-800/90 p-1.5 rounded-lg shadow-xl border border-gray-700">
-            <button onClick={zoomIn} className="p-2 hover:bg-gray-700 rounded" title="Zoom In"><ZoomIn size={16} /></button>
-            <button onClick={zoomOut} className="p-2 hover:bg-gray-700 rounded" title="Zoom Out"><ZoomOut size={16} /></button>
-            <button onClick={resetCamera} className="p-2 hover:bg-gray-700 rounded" title="Reset"><Home size={16} /></button>
-            <button onClick={() => fitCamera(loadedFiles)} className="p-2 hover:bg-gray-700 rounded text-blue-400" title="Fit All"><Maximize size={16} /></button>
+          {/* Floating Camera Controls (Right Side) */}
+          <div className="absolute top-20 right-3 flex flex-col gap-1 bg-gray-800/90 p-1.5 rounded-lg shadow-xl border border-gray-700 backdrop-blur-sm z-10">
+            <button onClick={zoomIn} className="p-2 hover:bg-gray-700 rounded text-white" title="Zoom In"><ZoomIn size={isMobile ? 18 : 20} /></button>
+            <button onClick={zoomOut} className="p-2 hover:bg-gray-700 rounded text-white" title="Zoom Out"><ZoomOut size={isMobile ? 18 : 20} /></button>
+            <button onClick={resetCamera} className="p-2 hover:bg-gray-700 rounded text-white" title="Reset Camera"><Home size={isMobile ? 18 : 20} /></button>
+            <button onClick={() => fitCamera(loadedFiles)} className="p-2 hover:bg-gray-700 rounded text-blue-400" title="Zoom All"><Maximize size={isMobile ? 18 : 20} /></button>
           </div>
 
           {showSubView && (
-            <div className="absolute bottom-3 right-3 border-2 border-purple-500 rounded overflow-hidden shadow-xl bg-gray-900">
+            <div className="absolute bottom-12 right-3 border-2 border-purple-500 rounded overflow-hidden shadow-xl bg-gray-900 z-10">
               <div className="bg-purple-600 px-2 py-0.5 text-[10px] font-medium">Overview</div>
-              <div ref={subViewRef} style={{ width: 180, height: 180 }} />
+              <div ref={subViewRef} style={{ width: isMobile ? 120 : 180, height: isMobile ? 120 : 180 }} />
             </div>
           )}
 
           {sectionBoxEnabled && (
-            <div className="absolute top-3 left-1/2 -translate-x-1/2 bg-cyan-600 px-3 py-1.5 rounded shadow text-xs flex items-center gap-2 font-medium">
+            <div className="absolute top-3 left-1/2 -translate-x-1/2 bg-cyan-600 px-3 py-1.5 rounded shadow text-xs flex items-center gap-2 font-medium z-10 pointer-events-none">
               <BoxSelect size={14} /> Section Box Active
             </div>
           )}
         </div>
 
         {/* Status Bar / Footer */}
-        <div className="bg-gray-800 border-t border-gray-700 px-3 py-1.5 text-[11px] text-gray-400 flex justify-between items-center">
-          <div className="flex gap-4">
+        <div className="bg-gray-800 border-t border-gray-700 px-3 py-1.5 text-[10px] sm:text-[11px] text-gray-400 flex justify-between items-center whitespace-nowrap overflow-x-auto">
+          <div className="flex gap-3 sm:gap-4">
             <span>📁 {loadedFiles.length} files</span>
-            <span>🎨 {renderMode}</span>
+            {!isMobile && <span>🎨 {globalRenderMode}</span>}
             {sectionBoxEnabled && <span className="text-cyan-400">📦 Section</span>}
-            {showSubView && <span className="text-purple-400">📺 SubView</span>}
-            {selectedNode && <span className="text-yellow-400">✓ {selectedNode.name}</span>}
+            {selectedNode && <span className="text-yellow-400 truncate max-w-[100px]">✓ {selectedNode.name}</span>}
           </div>
           <div className="flex items-center gap-3">
             <span>© 2025 SeaStar</span>
@@ -789,43 +860,60 @@ const MultiDXFViewer: React.FC<MultiDXFViewerProps> = ({ files }) => {
         </div>
       </div>
 
-      {/* Right Properties Panel */}
+      {/* Right Properties Panel - Responsive: Overlay sidebar for mobile */}
       {selectedNode && (
-        <div className="w-72 bg-[#1a1a20] border-l border-gray-700 flex flex-col flex-shrink-0">
-          <div className="p-3 border-b border-gray-700 flex items-center gap-2 bg-gradient-to-r from-orange-900/30 to-transparent">
-            <Palette size={16} className="text-orange-400" />
-            <span className="font-bold text-sm">Properties</span>
+        <div className={`${isMobile ? 'absolute top-0 right-0 bottom-0 z-30 shadow-2xl w-3/4 max-w-xs transition-transform duration-300' : 'relative w-80'} ${isPropertiesOpen ? 'translate-x-0' : 'translate-x-full'} bg-[#1a1a20] border-l border-gray-700 flex flex-col flex-shrink-0 ${!isMobile ? 'shadow-xl z-10' : ''}`}>
+          <div className="p-4 border-b border-gray-700 flex items-center gap-2 bg-gradient-to-r from-gray-800 to-transparent">
+            <MousePointer2 size={18} className="text-green-400" />
+            <span className="font-bold text-sm text-white">Selected Object Properties</span>
+            <button onClick={() => { setSelectedNode(null); if (isMobile) setIsPropertiesOpen(false); }} className="ml-auto text-gray-400 hover:text-white">✕</button>
           </div>
 
-          <div className="flex-1 overflow-y-auto p-3 space-y-4">
+          <div className="flex-1 overflow-y-auto p-4 space-y-6">
             {/* Info */}
-            <div className="bg-gray-800/50 rounded-lg p-3 space-y-2">
+            <div className="bg-gray-800/50 rounded-lg p-3 space-y-2 border border-gray-700">
               <div className="flex items-center gap-2">
                 {selectedNode.type === 'file' ? <Box size={16} className="text-blue-400" /> : <Layers size={16} className="text-purple-400" />}
-                <span className="font-semibold text-sm">{selectedNode.name}</span>
+                <span className="font-semibold text-sm text-white">{selectedNode.name}</span>
               </div>
-              <div className="text-[11px] text-gray-400">
+              <div className="text-xs text-gray-400">
                 Type: {selectedNode.type === 'file' ? 'File' : 'Layer'} • {selectedNode.entityCount} entities
+              </div>
+            </div>
+
+            {/* Individual Render Mode */}
+            <div className="space-y-2">
+              <div className="text-xs font-semibold text-gray-300 flex items-center gap-1"><Sun size={14} /> Display Mode</div>
+              <div className="flex gap-2 p-1 bg-gray-800 rounded-lg">
+                <button onClick={() => updateNodeRenderMode(selectedNode.id, 'shaded')} className={`flex-1 py-1.5 rounded text-xs transition-colors ${selectedNode.renderMode === 'shaded' ? 'bg-blue-600 text-white' : 'hover:bg-gray-700 text-gray-400'}`}>Shaded</button>
+                <button onClick={() => updateNodeRenderMode(selectedNode.id, 'wireframe')} className={`flex-1 py-1.5 rounded text-xs transition-colors ${selectedNode.renderMode === 'wireframe' ? 'bg-blue-600 text-white' : 'hover:bg-gray-700 text-gray-400'}`}>Wire</button>
+                <button onClick={() => updateNodeRenderMode(selectedNode.id, 'xray')} className={`flex-1 py-1.5 rounded text-xs transition-colors ${selectedNode.renderMode === 'xray' ? 'bg-blue-600 text-white' : 'hover:bg-gray-700 text-gray-400'}`}>X-Ray</button>
               </div>
             </div>
 
             {/* Color */}
             <div className="space-y-2">
-              <div className="text-xs text-gray-400 flex items-center gap-1"><Palette size={12} /> Color</div>
-              <input
-                type="color"
-                value={selectedNode.color || '#ffffff'}
-                onChange={(e) => updateNodeColor(selectedNode.id, e.target.value)}
-                className="w-full h-10 bg-gray-700 rounded-lg cursor-pointer border border-gray-600"
-                title="Select color"
-              />
+              <div className="text-xs font-semibold text-gray-300 flex items-center gap-1"><Palette size={14} /> Material Color</div>
+              <div className="flex gap-2">
+                <input
+                  type="color"
+                  value={selectedNode.color || '#ffffff'}
+                  onChange={(e) => updateNodeColor(selectedNode.id, e.target.value)}
+                  className="w-10 h-10 bg-transparent rounded cursor-pointer border-0 p-0"
+                  title="Select color"
+                />
+                <div className="flex-1 flex flex-col justify-center">
+                  <div className="text-[10px] text-gray-500 uppercase">{selectedNode.color}</div>
+                  <div className="text-xs text-gray-400">Click circle to change</div>
+                </div>
+              </div>
             </div>
 
             {/* Opacity */}
             <div className="space-y-2">
-              <div className="text-xs text-gray-400 flex justify-between">
+              <div className="text-xs font-semibold text-gray-300 flex justify-between">
                 <span>Opacity</span>
-                <span className="font-mono">{Math.round((selectedNode.opacity || 1) * 100)}%</span>
+                <span className="font-mono text-blue-400">{Math.round((selectedNode.opacity || 1) * 100)}%</span>
               </div>
               <input
                 type="range"
@@ -833,21 +921,36 @@ const MultiDXFViewer: React.FC<MultiDXFViewerProps> = ({ files }) => {
                 max="100"
                 value={(selectedNode.opacity || 1) * 100}
                 onChange={(e) => updateNodeOpacity(selectedNode.id, Number(e.target.value) / 100)}
-                className="w-full accent-blue-500"
+                className="w-full accent-blue-500 h-1 bg-gray-700 rounded-lg appearance-none cursor-pointer"
                 title="Adjust opacity"
               />
             </div>
 
+            {/* Rotation */}
+            {selectedNode.object && (
+              <div className="space-y-2">
+                <div className="text-xs font-semibold text-gray-300 flex items-center gap-1"><RotateCw size={14} /> Rotation Control</div>
+                <div className="grid grid-cols-3 gap-2">
+                  <button onClick={() => rotateObject('x', 90)} className="py-2 bg-gray-800 hover:bg-gray-700 rounded text-xs font-mono border border-gray-700">X +90°</button>
+                  <button onClick={() => rotateObject('y', 90)} className="py-2 bg-gray-800 hover:bg-gray-700 rounded text-xs font-mono border border-gray-700">Y +90°</button>
+                  <button onClick={() => rotateObject('z', 90)} className="py-2 bg-gray-800 hover:bg-gray-700 rounded text-xs font-mono border border-gray-700">Z +90°</button>
+                  <button onClick={() => rotateObject('x', -90)} className="py-2 bg-gray-800 hover:bg-gray-700 rounded text-xs font-mono border border-gray-700">X -90°</button>
+                  <button onClick={() => rotateObject('y', -90)} className="py-2 bg-gray-800 hover:bg-gray-700 rounded text-xs font-mono border border-gray-700">Y -90°</button>
+                  <button onClick={() => rotateObject('z', -90)} className="py-2 bg-gray-800 hover:bg-gray-700 rounded text-xs font-mono border border-gray-700">Z -90°</button>
+                </div>
+              </div>
+            )}
+
             {/* Move Object */}
             {selectedNode.object && (
               <div className="space-y-2">
-                <div className="text-xs text-gray-400 flex items-center gap-1"><Move3d size={12} /> Move</div>
-                <div className="grid grid-cols-3 gap-1.5">
+                <div className="text-xs font-semibold text-gray-300 flex items-center gap-1"><Move3d size={14} /> Position Control</div>
+                <div className="grid grid-cols-3 gap-2">
                   {[['x', -50, 'X-'], ['x', 50, 'X+'], ['y', 50, 'Y+'], ['z', -50, 'Z-'], ['y', -50, 'Y-'], ['z', 50, 'Z+']].map(([axis, delta, label]) => (
                     <button
                       key={label as string}
                       onClick={() => moveObject(axis as 'x' | 'y' | 'z', delta as number)}
-                      className="py-2 bg-gray-700 hover:bg-gray-600 rounded text-xs font-mono font-bold"
+                      className="py-2 bg-gray-800 hover:bg-gray-700 rounded text-xs font-mono font-bold border border-gray-700"
                     >
                       {label as string}
                     </button>
@@ -856,14 +959,20 @@ const MultiDXFViewer: React.FC<MultiDXFViewerProps> = ({ files }) => {
               </div>
             )}
 
-            {/* Position */}
+            {/* Position Info */}
             {selectedNode.object && (
-              <div className="bg-gray-800/50 rounded-lg p-3">
-                <div className="text-xs text-gray-400 mb-2">Position</div>
+              <div className="bg-gray-800/30 rounded-lg p-3 border border-gray-700/50">
+                <div className="text-xs text-gray-500 mb-2 uppercase tracking-wider">Transform Data</div>
                 <div className="font-mono text-xs space-y-1">
-                  <div className="flex justify-between"><span className="text-red-400">X:</span> <span>{selectedNode.object.position.x.toFixed(1)}</span></div>
-                  <div className="flex justify-between"><span className="text-green-400">Y:</span> <span>{selectedNode.object.position.y.toFixed(1)}</span></div>
-                  <div className="flex justify-between"><span className="text-blue-400">Z:</span> <span>{selectedNode.object.position.z.toFixed(1)}</span></div>
+                  <div className="flex justify-between border-b border-gray-700/50 pb-1"><span className="text-gray-400">Position</span></div>
+                  <div className="flex justify-between pl-2"><span className="text-red-400">X</span> <span>{selectedNode.object.position.x.toFixed(1)}</span></div>
+                  <div className="flex justify-between pl-2"><span className="text-green-400">Y</span> <span>{selectedNode.object.position.y.toFixed(1)}</span></div>
+                  <div className="flex justify-between pl-2"><span className="text-blue-400">Z</span> <span>{selectedNode.object.position.z.toFixed(1)}</span></div>
+
+                  <div className="flex justify-between border-b border-gray-700/50 pb-1 mt-2"><span className="text-gray-400">Rotation</span></div>
+                  <div className="flex justify-between pl-2"><span className="text-red-400">X</span> <span>{(selectedNode.object.rotation.x * 180 / Math.PI).toFixed(0)}°</span></div>
+                  <div className="flex justify-between pl-2"><span className="text-green-400">Y</span> <span>{(selectedNode.object.rotation.y * 180 / Math.PI).toFixed(0)}°</span></div>
+                  <div className="flex justify-between pl-2"><span className="text-blue-400">Z</span> <span>{(selectedNode.object.rotation.z * 180 / Math.PI).toFixed(0)}°</span></div>
                 </div>
               </div>
             )}
@@ -874,17 +983,17 @@ const MultiDXFViewer: React.FC<MultiDXFViewerProps> = ({ files }) => {
       {/* Loading Overlay */}
       {loading && (
         <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-black/90">
-          <div className="w-12 h-12 border-3 border-blue-500 border-t-transparent rounded-full animate-spin mb-3"></div>
-          <span className="text-blue-400 text-sm font-medium">{status || 'Processing...'}</span>
+          <div className="w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mb-4"></div>
+          <span className="text-blue-400 text-sm font-medium tracking-wider">{status || 'PROCESSING...'}</span>
         </div>
       )}
 
       {/* Error */}
       {error && (
-        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-red-950/95 p-6 rounded-xl border border-red-500/50 text-center max-w-sm z-50 shadow-2xl">
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-red-950/95 p-6 rounded-xl border border-red-500/50 text-center max-w-sm z-50 shadow-2xl backdrop-blur-sm">
           <div className="text-4xl mb-3">⚠️</div>
-          <p className="text-red-200 text-sm mb-4">{error}</p>
-          <button onClick={() => setError('')} className="px-4 py-2 bg-red-800 hover:bg-red-700 rounded-lg text-sm font-medium">Dismiss</button>
+          <p className="text-red-200 text-sm mb-4 font-medium">{error}</p>
+          <button onClick={() => setError('')} className="px-6 py-2 bg-red-800 hover:bg-red-700 rounded-lg text-sm font-bold transition-colors shadow-lg">DISMISS</button>
         </div>
       )}
     </div>
