@@ -122,8 +122,26 @@ const AutoDXFLoader: React.FC = () => {
   if (loading) {
     return (
       <div className="w-screen h-screen flex flex-col items-center justify-center bg-gradient-to-br from-gray-900 via-gray-800 to-gray-900 text-white">
-        {/* 로고 */}
-        <img src="/logo.jpg" alt="Logo" className="w-20 h-20 mb-6 rounded-full shadow-lg" />
+        <style>{`
+          @keyframes rotate360 {
+            from { transform: rotateY(0deg); }
+            to { transform: rotateY(360deg); }
+          }
+          .logo-rotate {
+            animation: rotate360 2s linear infinite;
+            transform-style: preserve-3d;
+          }
+        `}</style>
+
+        {/* 로고 - 원본 비율, 360도 회전 */}
+        <div className="mb-8" style={{ perspective: '1000px' }}>
+          <img
+            src="/logo.jpg"
+            alt="SeaStar Logo"
+            className="logo-rotate h-auto max-w-[300px] shadow-2xl rounded-lg"
+            style={{ maxHeight: '80px' }}
+          />
+        </div>
 
         {/* 로딩 스피너 */}
         <div className="relative mb-6">
