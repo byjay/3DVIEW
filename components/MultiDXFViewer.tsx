@@ -199,7 +199,27 @@ const MultiDXFViewer: React.FC<MultiDXFViewerProps> = ({ files }) => {
   }, [showSubView]);
 
   useEffect(() => {
-    if (files.length > 0 && sceneRef.current) loadAllDXFFiles(files);
+    if (!sceneRef.current) return;
+
+    if (files.length === 0) {
+      // 파일이 없으면 씬 정리
+      const toRemove: THREE.Object3D[] = [];
+      sceneRef.current.traverse((child) => {
+        if (child.name && (child.name.startsWith('auto-') || child.name.startsWith('manual-') || child.name.startsWith('layer_'))) {
+          toRemove.push(child);
+        }
+      });
+      toRemove.forEach(child => sceneRef.current?.remove(child));
+      setTreeData([]);
+      setLoadedFiles([]);
+      setSelectedNode(null);
+      if (outlineRef.current) {
+        sceneRef.current.remove(outlineRef.current);
+        outlineRef.current = null;
+      }
+    } else {
+      loadAllDXFFiles(files);
+    }
   }, [files]);
 
   // Section Box 생성/제거

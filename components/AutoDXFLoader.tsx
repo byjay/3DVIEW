@@ -163,8 +163,8 @@ const AutoDXFLoader: React.FC = () => {
         {/* Header */}
         <div className="flex items-center justify-between px-4 py-3 bg-gradient-to-r from-gray-800 to-gray-850 border-b border-gray-700 shadow-md z-10">
           <div className="flex items-center gap-3">
-            {/* 로고 */}
-            <img src="/logo.jpg" alt="Logo" className="w-10 h-10 rounded-lg shadow" />
+            {/* 로고 - 원본 비율 */}
+            <img src="/logo.jpg" alt="SeaStar Logo" className="h-8 w-auto rounded shadow" />
             <h1 className="text-lg font-bold text-gray-100 tracking-tight">
               3D DXF Viewer
             </h1>
@@ -197,25 +197,6 @@ const AutoDXFLoader: React.FC = () => {
             )}
           </div>
         </div>
-
-        {/* File List Bar */}
-        {hasFiles && (
-          <div className="px-4 py-2 bg-gray-800/50 border-b border-gray-700 flex flex-wrap gap-2 max-h-24 overflow-y-auto">
-            {dxfFiles.map((file, idx) => (
-              <div key={file.id} className="flex items-center gap-2 px-2 py-1 bg-white/5 rounded border border-white/10">
-                <span className="text-[10px] text-gray-500 font-mono">#{idx + 1}</span>
-                <div className="w-2.5 h-2.5 rounded" style={{ backgroundColor: file.color }} />
-                <span className="text-xs text-gray-200 max-w-[100px] truncate" title={file.name}>{file.name}</span>
-                <button
-                  onClick={() => handleRemoveFile(file.id)}
-                  className="text-gray-500 hover:text-red-400 text-sm"
-                >
-                  ✕
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
 
         {/* Main Content */}
         <div className="flex-1 relative">
@@ -252,7 +233,7 @@ const AutoDXFLoader: React.FC = () => {
         {/* Footer - 저작권 */}
         <div className="px-4 py-2 bg-gray-800 border-t border-gray-700 flex items-center justify-between text-xs text-gray-500">
           <div className="flex items-center gap-2">
-            <img src="/logo.jpg" alt="Logo" className="w-5 h-5 rounded" />
+            <img src="/logo.jpg" alt="SeaStar Logo" className="h-4 w-auto rounded" />
             <span>© 2025 SeaStar. All rights reserved.</span>
           </div>
           <div className="flex items-center gap-3">
