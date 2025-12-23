@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
-import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls';
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js';
 import { DXFFile } from '../types';
 import {
   ChevronRight, ChevronDown, Layers, Box, Maximize, Palette, CheckSquare, Square,
@@ -61,12 +62,31 @@ const MultiDXFViewer: React.FC<MultiDXFViewerProps> = ({ files }) => {
   // Scene State
   const [fileStates, setFileStates] = useState<LoadedFileState[]>([]);
   const [renderMode, setRenderMode] = useState<'shaded' | 'wireframe' | 'xray'>('shaded');
-  const [sectionBoxObject, setSectionBoxObject] = useState<THREE.BoxHelper | null>(null);
-  const [isSectionBoxActive, setIsSectionBoxActive] = useState(false);
 
-  // UI State
-  const [expandedNodes, setExpandedNodes] = useState<Record<string, boolean>>({}); // "fileId", "fileId-layerName"
-  const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null);
+  // Slice / Section Box State
+  interface SliceSettings {
+    enabled: boolean;
+    bounds: {
+      xMin: number; xMax: number;
+      yMin: number; yMax: number;
+      zMin: number; zMax: number;
+    }
+  }
+  const [sliceSettings, setSliceSettings] = useState<SliceSettings>({
+    enabled: false,
+    bounds: { xMin: -1000, xMax: 1000, yMin: -1000, yMax: 1000, zMin: -1000, zMax: 1000 }
+  });
+  const [sceneBounds, setSceneBounds] = useState<{ min: THREE.Vector3, max: THREE.Vector3 }>({
+    min: new THREE.Vector3(-1000, -1000, -1000),
+    max: new THREE.Vector3(1000, 1000, 1000)
+  });
+
+  const [gizmoMode, setGizmoMode] = useState<'translate' | 'scale' | 'none'>('scale');
+
+  // Refs for permanent objects to avoid re-creation loops
+  const visualBoxRef = useRef<THREE.LineSegments | null>(null);
+  const transformControlRef = useRef<TransformControls | null>(null);
+  const isDraggingRef = useRef(false);
 
   // Three.js Refs
   const sceneRef = useRef<THREE.Scene | null>(null);
@@ -74,6 +94,175 @@ const MultiDXFViewer: React.FC<MultiDXFViewerProps> = ({ files }) => {
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const controlsRef = useRef<OrbitControls | null>(null);
   const objectsMapRef = useRef<Map<string, THREE.Group>>(new Map()); // "fileId" -> Group
+  // UI State
+  const [expandedNodes, setExpandedNodes] = useState<Record<string, boolean>>({}); // "fileId", "fileId-layerName"
+  const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null);
+
+  // ... (Three init...)
+
+  // Fit to Selection Logic
+  const handleFitToSelection = () => {
+    if (!selectedObjectId || !sceneRef.current) return;
+
+    const fileId = selectedObjectId; // Assuming simple file selection for now
+    const group = objectsMapRef.current.get(fileId);
+
+    if (group) {
+      const box = new THREE.Box3().setFromObject(group);
+      if (!box.isEmpty()) {
+        const size = box.getSize(new THREE.Vector3());
+        const min = box.min;
+        const max = box.max;
+        // Add slight padding 1%
+        const pad = size.multiplyScalar(0.01);
+
+        setSliceSettings(prev => ({
+          ...prev,
+          enabled: true,
+          bounds: {
+            xMin: min.x - pad.x, xMax: max.x + pad.x,
+            yMin: min.y - pad.y, yMax: max.y + pad.y,
+            zMin: min.z - pad.z, zMax: max.z + pad.z,
+          }
+        }));
+      }
+    }
+  };
+
+  // Update Clipping Planes & Visual Box & Gizmo
+  useEffect(() => {
+    if (!rendererRef.current || !sceneRef.current || !cameraRef.current || !controlsRef.current) return;
+
+    // 1. Clipping Planes (Always update based on state)
+    if (sliceSettings.enabled) {
+      const planes = [
+        new THREE.Plane(new THREE.Vector3(1, 0, 0), -sliceSettings.bounds.xMin),
+        new THREE.Plane(new THREE.Vector3(-1, 0, 0), sliceSettings.bounds.xMax),
+        new THREE.Plane(new THREE.Vector3(0, 1, 0), -sliceSettings.bounds.yMin),
+        new THREE.Plane(new THREE.Vector3(0, -1, 0), sliceSettings.bounds.yMax),
+        new THREE.Plane(new THREE.Vector3(0, 0, 1), -sliceSettings.bounds.zMin),
+        new THREE.Plane(new THREE.Vector3(0, 0, -1), sliceSettings.bounds.zMax)
+      ];
+      rendererRef.current.clippingPlanes = planes;
+    } else {
+      rendererRef.current.clippingPlanes = [];
+    }
+
+    // 2. Visual Box & Gizmo Management
+    const boxName = 'slice-visual-box';
+
+    // Create Gizmo if not exists
+    if (!transformControlRef.current) {
+      const tControls = new TransformControls(cameraRef.current, rendererRef.current.domElement);
+      tControls.addEventListener('dragging-changed', (event) => {
+        if (controlsRef.current) controlsRef.current.enabled = !event.value;
+        isDraggingRef.current = event.value;
+
+        // On Drag End: Sync back to React State to update sliders
+        if (!event.value) {
+          syncBoxToState();
+        }
+      });
+      tControls.addEventListener('change', () => {
+        if (isDraggingRef.current) {
+          // Real-time update of planes while dragging
+          syncPlanesFromBox();
+        }
+      });
+      sceneRef.current.add(tControls);
+      transformControlRef.current = tControls;
+    }
+
+    // Helper to sync Box Transform -> Clipping Planes (Real-time)
+    const syncPlanesFromBox = () => {
+      if (!visualBoxRef.current || !rendererRef.current) return;
+      const box = new THREE.Box3().setFromObject(visualBoxRef.current);
+
+      const planes = [
+        new THREE.Plane(new THREE.Vector3(1, 0, 0), -box.min.x),
+        new THREE.Plane(new THREE.Vector3(-1, 0, 0), box.max.x),
+        new THREE.Plane(new THREE.Vector3(0, 1, 0), -box.min.y),
+        new THREE.Plane(new THREE.Vector3(0, -1, 0), box.max.y),
+        new THREE.Plane(new THREE.Vector3(0, 0, 1), -box.min.z),
+        new THREE.Plane(new THREE.Vector3(0, 0, -1), box.max.z)
+      ];
+      rendererRef.current.clippingPlanes = planes;
+    };
+
+    // Helper to sync Box Transform -> React State (Finalize)
+    const syncBoxToState = () => {
+      if (!visualBoxRef.current) return;
+      const box = new THREE.Box3().setFromObject(visualBoxRef.current);
+      setSliceSettings(prev => ({
+        ...prev,
+        bounds: {
+          xMin: box.min.x, xMax: box.max.x,
+          yMin: box.min.y, yMax: box.max.y,
+          zMin: box.min.z, zMax: box.max.z
+        }
+      }));
+    };
+
+
+    if (sliceSettings.enabled) {
+      // Calculate dimensions from State
+      const width = sliceSettings.bounds.xMax - sliceSettings.bounds.xMin;
+      const height = sliceSettings.bounds.yMax - sliceSettings.bounds.yMin;
+      const depth = sliceSettings.bounds.zMax - sliceSettings.bounds.zMin;
+
+      const centerX = sliceSettings.bounds.xMin + width / 2;
+      const centerY = sliceSettings.bounds.yMin + height / 2;
+      const centerZ = sliceSettings.bounds.zMin + depth / 2;
+
+      if (width > 0 && height > 0 && depth > 0) {
+        // Create or Update Box
+        if (!visualBoxRef.current) {
+          // Initialize
+          // Note: We use a Unit Box and Scale it, so transform controls work better for scaling?
+          // Actually, resizing a BoxGeometry via TransformControls 'scale' works fine.
+          const geometry = new THREE.BoxGeometry(1, 1, 1);
+          const edges = new THREE.EdgesGeometry(geometry);
+          const material = new THREE.LineBasicMaterial({ color: 0x00ffff, opacity: 0.5, transparent: true });
+          const boxLines = new THREE.LineSegments(edges, material);
+          boxLines.name = boxName;
+          sceneRef.current.add(boxLines);
+          visualBoxRef.current = boxLines;
+        }
+
+        // If NOT dragging, we force the box to match the State
+        // (If dragging, the gizmo controls the box, so we don't overwrite it)
+        if (!isDraggingRef.current && visualBoxRef.current) {
+          visualBoxRef.current.position.set(centerX, centerY, centerZ);
+          visualBoxRef.current.scale.set(width, height, depth);
+        }
+
+        // Attach Gizmo
+        if (transformControlRef.current) {
+          if (transformControlRef.current.object !== visualBoxRef.current) {
+            transformControlRef.current.attach(visualBoxRef.current);
+          }
+          transformControlRef.current.setMode(gizmoMode === 'none' ? 'translate' : gizmoMode); // default fallback
+          transformControlRef.current.visible = gizmoMode !== 'none';
+          transformControlRef.current.enabled = gizmoMode !== 'none';
+        }
+      }
+    } else {
+      // Cleanup
+      if (visualBoxRef.current) {
+        sceneRef.current.remove(visualBoxRef.current);
+        visualBoxRef.current = null;
+      }
+      if (transformControlRef.current) {
+        transformControlRef.current.detach();
+      }
+    }
+
+  }, [sliceSettings, rendererRef.current, sceneRef.current, gizmoMode]); // Re-run if mode changes
+
+
+
+  // Three.js Refs
+
 
   // 1. Initialize Three.js
   useEffect(() => {
@@ -199,7 +388,51 @@ const MultiDXFViewer: React.FC<MultiDXFViewerProps> = ({ files }) => {
 
     setFileStates(newFileStates);
     setParsing(false);
-    setTimeout(handleFitView, 100);
+
+    // Defer bounds calc & fit view
+    setTimeout(() => {
+      calculateSceneBounds();
+      handleFitView();
+    }, 100);
+  };
+
+  const calculateSceneBounds = () => {
+    if (!sceneRef.current) return;
+    const box = new THREE.Box3();
+    let hasObj = false;
+    sceneRef.current.traverse(o => {
+      if ((o.type === 'Line' || o.type === 'Mesh') && o.visible) {
+        box.expandByObject(o);
+        hasObj = true;
+      }
+    });
+
+    if (hasObj && !box.isEmpty()) {
+      const size = box.getSize(new THREE.Vector3());
+      const min = box.min;
+      const max = box.max;
+
+      // Pad slightly
+      const pad = size.multiplyScalar(0.1);
+      const exactMin = min.clone().sub(pad);
+      const exactMax = max.clone().add(pad);
+
+      setSceneBounds({ min: exactMin, max: exactMax });
+
+      // Initialize slice bounds if they look "default"
+      setSliceSettings(prev => {
+        // Only reset if we are freshly loading or it's way off? 
+        // Let's just reset to full bounds on new load for convenience
+        return {
+          enabled: prev.enabled,
+          bounds: {
+            xMin: exactMin.x, xMax: exactMax.x,
+            yMin: exactMin.y, yMax: exactMax.y,
+            zMin: exactMin.z, zMax: exactMax.z
+          }
+        };
+      });
+    }
   };
 
   // --------------------------------------------------------------------------
@@ -357,29 +590,7 @@ const MultiDXFViewer: React.FC<MultiDXFViewerProps> = ({ files }) => {
     }
   };
 
-  const toggleSectionBox = () => {
-    if (!sceneRef.current) return;
 
-    if (isSectionBoxActive) {
-      // Disable
-      if (sectionBoxObject) sceneRef.current.remove(sectionBoxObject);
-      setSectionBoxObject(null);
-      setIsSectionBoxActive(false);
-      if (rendererRef.current) rendererRef.current.clippingPlanes = []; // Clear global clippers
-      // Reset materials? Local clipping needs material props. 
-      // For simplicity, we just toggle Visual Box for now unless requested clipping.
-    } else {
-      // Enable
-      const box = new THREE.Box3();
-      sceneRef.current.traverse(o => { if ((o.type === 'Line' || o.type === 'Mesh') && o.visible) box.expandByObject(o); });
-      if (box.isEmpty()) return;
-
-      const helper = new THREE.Box3Helper(box, new THREE.Color(0x00ffff));
-      sceneRef.current.add(helper);
-      setSectionBoxObject(helper as any);
-      setIsSectionBoxActive(true);
-    }
-  };
 
   const changeRenderMode = (mode: 'shaded' | 'wireframe' | 'xray') => {
     setRenderMode(mode);
@@ -481,9 +692,9 @@ const MultiDXFViewer: React.FC<MultiDXFViewerProps> = ({ files }) => {
                 <div onClick={() => setExpandedNodes(p => ({ ...p, [file.id]: !p[file.id] }))} className="p-0.5 hover:bg-white/10 rounded">
                   {expandedNodes[file.id] ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                 </div>
-                <div className="flex-1 flex items-center gap-2" onClick={() => setExpandedNodes(p => ({ ...p, [file.id]: !p[file.id] }))}>
-                  <Box size={14} className="text-blue-400" />
-                  <span className="text-sm text-gray-200">{file.name}</span>
+                <div className={`flex-1 flex items-center gap-2 cursor-pointer ${selectedObjectId === file.id ? 'text-blue-400 font-bold' : 'text-gray-200'}`} onClick={() => { setExpandedNodes(p => ({ ...p, [file.id]: !p[file.id] })); setSelectedObjectId(file.id); }}>
+                  <Box size={14} className={selectedObjectId === file.id ? "text-blue-400" : "text-gray-400"} />
+                  <span className="text-sm">{file.name}</span>
                   <span className="text-[10px] text-gray-500 bg-gray-800 p-0.5 rounded px-1">{file.layers.length} Layers</span>
                 </div>
                 <button onClick={() => toggleFile(file.id, !file.visible)} className="p-1 opacity-50 hover:opacity-100">
@@ -525,7 +736,7 @@ const MultiDXFViewer: React.FC<MultiDXFViewerProps> = ({ files }) => {
           <div className="w-px h-6 bg-gray-600 mx-2" />
 
           <div className="flex items-center gap-2">
-            <button onClick={toggleSectionBox} className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium transition-colors ${isSectionBoxActive ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}>
+            <button onClick={() => setSliceSettings(p => ({ ...p, enabled: !p.enabled }))} className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium transition-colors ${sliceSettings.enabled ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}>
               <Scissors size={14} /> Section Box
             </button>
           </div>
@@ -559,15 +770,146 @@ const MultiDXFViewer: React.FC<MultiDXFViewerProps> = ({ files }) => {
         </div>
       </div>
 
-      {/* RIGHT: Properties */}
-      <div className="w-64 bg-[#1e1e24] border-l border-gray-700 flex flex-col">
-        <div className="h-10 border-b border-gray-700 bg-gray-800 flex items-center px-3 font-semibold text-xs uppercase tracking-wider text-gray-400">
-          Properties
-        </div>
-        <div className="p-4 text-xs text-gray-500 italic">Select an object...</div>
-      </div>
 
-    </div>
+
+      {/* RIGHT: Properties & Tools */}
+      <div className="w-80 bg-[#1e1e24] border-l border-gray-700 flex flex-col overflow-y-auto custom-scrollbar">
+        <div className="h-10 border-b border-gray-700 bg-gray-800 flex items-center px-3 font-semibold text-xs uppercase tracking-wider text-gray-400">
+          Tools & Properties
+        </div>
+
+        <div className="p-4 space-y-6">
+          {/* Slice Control Panel */}
+          <div className="bg-gray-800/50 rounded-lg p-3 border border-gray-700">
+            <div className="flex items-center justify-between mb-3">
+              <div className="text-sm font-bold text-gray-200 flex items-center gap-2">
+                <Scissors size={14} className="text-blue-400" /> Slice Control
+              </div>
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input type="checkbox" className="sr-only peer" checked={sliceSettings.enabled} onChange={e => setSliceSettings(p => ({ ...p, enabled: e.target.checked }))} />
+                <div className="w-9 h-5 bg-gray-600 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-blue-600"></div>
+              </label>
+            </div>
+
+            {sliceSettings.enabled && (
+              <div className="space-y-4">
+                {/* Gizmo Tools */}
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setGizmoMode(m => m === 'translate' ? 'none' : 'translate')}
+                    className={`flex-1 py-1.5 rounded text-xs flex items-center justify-center gap-1 transition-colors ${gizmoMode === 'translate' ? 'bg-blue-600 text-white' : 'bg-gray-700 hover:bg-gray-600 text-gray-300'}`}
+                    title="Move Section Box"
+                  >
+                    <MousePointer size={12} /> Move
+                  </button>
+                  <button
+                    onClick={() => setGizmoMode(m => m === 'scale' ? 'none' : 'scale')}
+                    className={`flex-1 py-1.5 rounded text-xs flex items-center justify-center gap-1 transition-colors ${gizmoMode === 'scale' ? 'bg-blue-600 text-white' : 'bg-gray-700 hover:bg-gray-600 text-gray-300'}`}
+                    title="Resize Section Box"
+                  >
+                    <Maximize size={12} /> Resize
+                  </button>
+                  <button
+                    onClick={handleFitToSelection}
+                    disabled={!selectedObjectId}
+                    className="flex-1 py-1.5 bg-gray-700 hover:bg-gray-600 text-xs text-white rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-1"
+                    title="Fit to Selected File"
+                  >
+                    <Box size={12} /> Fit Sel.
+                  </button>
+                </div>
+                {/* X Axis */}
+                <div className="space-y-1">
+                  <div className="flex justify-between text-xs text-gray-400"><span>X Axis</span><span>{sliceSettings.bounds.xMin.toFixed(0)} ~ {sliceSettings.bounds.xMax.toFixed(0)}</span></div>
+                  <div className="flex gap-2 items-center">
+                    <span className="text-[10px] w-6">Min</span>
+                    <input
+                      type="range" min={sceneBounds.min.x} max={sceneBounds.max.x} step={(sceneBounds.max.x - sceneBounds.min.x) / 100}
+                      value={sliceSettings.bounds.xMin}
+                      onChange={e => setSliceSettings(p => ({ ...p, bounds: { ...p.bounds, xMin: parseFloat(e.target.value) } }))}
+                      className="flex-1 h-1 bg-gray-600 rounded-lg appearance-none cursor-pointer"
+                    />
+                  </div>
+                  <div className="flex gap-2 items-center">
+                    <span className="text-[10px] w-6">Max</span>
+                    <input
+                      type="range" min={sceneBounds.min.x} max={sceneBounds.max.x} step={(sceneBounds.max.x - sceneBounds.min.x) / 100}
+                      value={sliceSettings.bounds.xMax}
+                      onChange={e => setSliceSettings(p => ({ ...p, bounds: { ...p.bounds, xMax: parseFloat(e.target.value) } }))}
+                      className="flex-1 h-1 bg-gray-600 rounded-lg appearance-none cursor-pointer"
+                    />
+                  </div>
+                </div>
+
+                {/* Y Axis */}
+                <div className="space-y-1">
+                  <div className="flex justify-between text-xs text-gray-400"><span>Y Axis</span><span>{sliceSettings.bounds.yMin.toFixed(0)} ~ {sliceSettings.bounds.yMax.toFixed(0)}</span></div>
+                  <div className="flex gap-2 items-center">
+                    <span className="text-[10px] w-6">Min</span>
+                    <input
+                      type="range" min={sceneBounds.min.y} max={sceneBounds.max.y} step={(sceneBounds.max.y - sceneBounds.min.y) / 100}
+                      value={sliceSettings.bounds.yMin}
+                      onChange={e => setSliceSettings(p => ({ ...p, bounds: { ...p.bounds, yMin: parseFloat(e.target.value) } }))}
+                      className="flex-1 h-1 bg-gray-600 rounded-lg appearance-none cursor-pointer"
+                    />
+                  </div>
+                  <div className="flex gap-2 items-center">
+                    <span className="text-[10px] w-6">Max</span>
+                    <input
+                      type="range" min={sceneBounds.min.y} max={sceneBounds.max.y} step={(sceneBounds.max.y - sceneBounds.min.y) / 100}
+                      value={sliceSettings.bounds.yMax}
+                      onChange={e => setSliceSettings(p => ({ ...p, bounds: { ...p.bounds, yMax: parseFloat(e.target.value) } }))}
+                      className="flex-1 h-1 bg-gray-600 rounded-lg appearance-none cursor-pointer"
+                    />
+                  </div>
+                </div>
+
+                {/* Z Axis */}
+                <div className="space-y-1">
+                  <div className="flex justify-between text-xs text-gray-400"><span>Z Axis</span><span>{sliceSettings.bounds.zMin.toFixed(0)} ~ {sliceSettings.bounds.zMax.toFixed(0)}</span></div>
+                  <div className="flex gap-2 items-center">
+                    <span className="text-[10px] w-6">Min</span>
+                    <input
+                      type="range" min={sceneBounds.min.z} max={sceneBounds.max.z} step={(sceneBounds.max.z - sceneBounds.min.z) / 100}
+                      value={sliceSettings.bounds.zMin}
+                      onChange={e => setSliceSettings(p => ({ ...p, bounds: { ...p.bounds, zMin: parseFloat(e.target.value) } }))}
+                      className="flex-1 h-1 bg-gray-600 rounded-lg appearance-none cursor-pointer"
+                    />
+                  </div>
+                  <div className="flex gap-2 items-center">
+                    <span className="text-[10px] w-6">Max</span>
+                    <input
+                      type="range" min={sceneBounds.min.z} max={sceneBounds.max.z} step={(sceneBounds.max.z - sceneBounds.min.z) / 100}
+                      value={sliceSettings.bounds.zMax}
+                      onChange={e => setSliceSettings(p => ({ ...p, bounds: { ...p.bounds, zMax: parseFloat(e.target.value) } }))}
+                      className="flex-1 h-1 bg-gray-600 rounded-lg appearance-none cursor-pointer"
+                    />
+                  </div>
+                </div>
+
+                <button
+                  onClick={() => {
+                    setSliceSettings(p => ({ ...p, bounds: { xMin: sceneBounds.min.x, xMax: sceneBounds.max.x, yMin: sceneBounds.min.y, yMax: sceneBounds.max.y, zMin: sceneBounds.min.z, zMax: sceneBounds.max.z } }));
+                  }}
+                  className="w-full py-1.5 bg-gray-700 hover:bg-gray-600 text-xs text-white rounded transition-colors"
+                >
+                  Reset Planes
+                </button>
+              </div>
+            )}
+          </div>
+
+          {!sliceSettings.enabled && (
+            <div className="text-xs text-gray-500 italic">Select an object or enable tools...</div>
+          )}
+
+          {/* Debug Info */}
+          {/* <div className="text-[10px] text-gray-600 font-mono mt-10">
+              Debug: {sceneBounds.min.x.toFixed(1)} ~ {sceneBounds.max.x.toFixed(1)}
+           </div> */}
+        </div>
+      </div>
+    </div >
   );
 };
 
