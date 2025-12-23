@@ -61,7 +61,7 @@ const MultiDXFViewer: React.FC<MultiDXFViewerProps> = ({ files }) => {
 
   // Scene State
   const [fileStates, setFileStates] = useState<LoadedFileState[]>([]);
-  const [renderMode, setRenderMode] = useState<'shaded' | 'wireframe' | 'xray'>('shaded');
+  const [renderMode, setRenderMode] = useState<'shaded' | 'wireframe' | 'xray' | 'sizeMap'>('shaded');
 
   // Slice / Section Box State
   interface SliceSettings {
@@ -592,8 +592,15 @@ const MultiDXFViewer: React.FC<MultiDXFViewerProps> = ({ files }) => {
 
 
 
-  const changeRenderMode = (mode: 'shaded' | 'wireframe' | 'xray') => {
+  const changeRenderMode = (mode: 'shaded' | 'wireframe' | 'xray' | 'sizeMap') => {
     setRenderMode(mode);
+
+    if (mode === 'sizeMap') {
+      applySizeBasedColoring();
+      return;
+    }
+
+    // Reset to standard coloring for other modes
     sceneRef.current?.traverse(child => {
       if (child instanceof THREE.Mesh) {
         const m = child.material as THREE.MeshBasicMaterial;
@@ -602,6 +609,72 @@ const MultiDXFViewer: React.FC<MultiDXFViewerProps> = ({ files }) => {
         m.opacity = mode === 'xray' ? 0.4 : 1;
         m.needsUpdate = true;
       }
+      if (child instanceof THREE.Line) {
+        const m = child.material as THREE.LineBasicMaterial;
+        m.transparent = mode === 'xray';
+        m.opacity = mode === 'xray' ? 0.4 : 1;
+        m.needsUpdate = true;
+      }
+    });
+  };
+
+  // Size-based Coloring Function
+  const applySizeBasedColoring = () => {
+    if (!sceneRef.current) return;
+
+    // 1. Collect all objects and their sizes
+    const objectSizes: { obj: THREE.Object3D, size: number }[] = [];
+
+    sceneRef.current.traverse(child => {
+      if (child instanceof THREE.Line || child instanceof THREE.Mesh) {
+        const box = new THREE.Box3().setFromObject(child);
+        if (!box.isEmpty()) {
+          const size = box.getSize(new THREE.Vector3());
+          const volume = size.x * size.y * size.z;
+          const diagonal = Math.sqrt(size.x ** 2 + size.y ** 2 + size.z ** 2);
+          objectSizes.push({ obj: child, size: diagonal });
+        }
+      }
+    });
+
+    if (objectSizes.length === 0) return;
+
+    // 2. Find min/max sizes
+    const sizes = objectSizes.map(o => o.size);
+    const minSize = Math.min(...sizes);
+    const maxSize = Math.max(...sizes);
+    const range = maxSize - minSize || 1;
+
+    // 3. Apply color gradient (Blue=Small → Cyan → Green → Yellow → Red=Large)
+    objectSizes.forEach(({ obj, size }) => {
+      const t = (size - minSize) / range; // 0 to 1
+
+      // HSL: Blue(240) → Red(0)
+      const hue = (1 - t) * 240; // 240 (blue) to 0 (red)
+      const saturation = 0.8;
+      const lightness = 0.5;
+      const color = new THREE.Color().setHSL(hue / 360, saturation, lightness);
+
+      // Opacity: Small objects more transparent
+      const opacity = 0.3 + t * 0.7; // 0.3 (small) to 1.0 (large)
+
+      if (obj instanceof THREE.Line) {
+        const mat = obj.material as THREE.LineBasicMaterial;
+        mat.color.copy(color);
+        mat.transparent = true;
+        mat.opacity = opacity;
+        mat.needsUpdate = true;
+      }
+      if (obj instanceof THREE.Mesh) {
+        const mat = obj.material as THREE.MeshBasicMaterial;
+        mat.color.copy(color);
+        mat.transparent = true;
+        mat.opacity = opacity;
+        mat.needsUpdate = true;
+      }
+
+      // Store original size in userData for potential tooltip
+      obj.userData.calculatedSize = size;
     });
   };
 
@@ -745,6 +818,7 @@ const MultiDXFViewer: React.FC<MultiDXFViewerProps> = ({ files }) => {
             <button onClick={() => changeRenderMode('shaded')} className={`px-2 py-1 text-xs rounded ${renderMode === 'shaded' ? 'bg-blue-600 text-white' : 'hover:bg-gray-600 text-gray-400'}`}>Shaded</button>
             <button onClick={() => changeRenderMode('wireframe')} className={`px-2 py-1 text-xs rounded ${renderMode === 'wireframe' ? 'bg-blue-600 text-white' : 'hover:bg-gray-600 text-gray-400'}`}>Wireframe</button>
             <button onClick={() => changeRenderMode('xray')} className={`px-2 py-1 text-xs rounded ${renderMode === 'xray' ? 'bg-blue-600 text-white' : 'hover:bg-gray-600 text-gray-400'}`}>X-Ray</button>
+            <button onClick={() => changeRenderMode('sizeMap')} className={`px-2 py-1 text-xs rounded ${renderMode === 'sizeMap' ? 'bg-green-600 text-white' : 'hover:bg-gray-600 text-gray-400'}`} title="Color by Size">Size Map</button>
           </div>
         </div>
 
